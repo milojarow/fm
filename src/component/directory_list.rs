@@ -19,6 +19,7 @@ use tracing::*;
 
 use super::app::AppMsg;
 use super::new_folder_dialog::{NewFolderDialog, NewFolderDialogMsg};
+use crate::config;
 use crate::ops;
 use crate::util::{self, fmt_files_as_uris, BitsetExt, GFileInfoExt};
 
@@ -59,6 +60,9 @@ impl Directory {
         self.list_model
             .model()
             .and_downcast::<gtk::SortListModel>()
+            .unwrap()
+            .model()
+            .and_downcast::<gtk::FilterListModel>()
             .unwrap()
             .model()
             .and_downcast()
@@ -181,13 +185,17 @@ impl FactoryComponent for Directory {
                     &**gio::FILE_ATTRIBUTE_STANDARD_TYPE,
                     &**gio::FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE,
                     &**gio::FILE_ATTRIBUTE_STANDARD_IS_SYMLINK,
+                    &**gio::FILE_ATTRIBUTE_STANDARD_IS_HIDDEN,
                 ]
                 .join(","),
             ),
             Some(&dir),
         );
 
-        let list_model = gtk::SortListModel::new(Some(directory_list.clone()), Some(file_sorter()));
+        let list_model =
+            gtk::FilterListModel::new(Some(directory_list.clone()), Some(hidden_filter()));
+
+        let list_model = gtk::SortListModel::new(Some(list_model), Some(file_sorter()));
 
         let list_model = gtk::MultiSelection::new(Some(list_model));
 
@@ -875,6 +883,48 @@ fn open_application_for_file(file: &gio::File, sender: &FactorySender<Directory>
     {
         sender.output(AppMsg::Error(Box::new(e))).unwrap();
     }
+}
+
+thread_local! {
+    /// Weak handles to the hidden-file filter of every live directory panel,
+    /// poked by [`refresh_hidden_filters`] when the setting toggles.
+    static HIDDEN_FILTERS: RefCell<Vec<glib::WeakRef<gtk::CustomFilter>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Constructs a filter that hides hidden files unless [`config::show_hidden`] is set.
+fn hidden_filter() -> gtk::CustomFilter {
+    let filter = gtk::CustomFilter::new(|obj| {
+        config::show_hidden()
+            || !obj
+                .downcast_ref::<gio::FileInfo>()
+                .map(|info| info.is_hidden())
+                .unwrap_or(false)
+    });
+
+    HIDDEN_FILTERS.with(|filters| filters.borrow_mut().push(filter.downgrade()));
+
+    filter
+}
+
+/// Re-evaluates the hidden-file filter of every live directory panel. Call after
+/// [`config::set_show_hidden`] changes the setting.
+pub fn refresh_hidden_filters() {
+    let change = if config::show_hidden() {
+        gtk::FilterChange::LessStrict
+    } else {
+        gtk::FilterChange::MoreStrict
+    };
+
+    HIDDEN_FILTERS.with(|filters| {
+        filters.borrow_mut().retain(|weak| match weak.upgrade() {
+            Some(filter) => {
+                filter.changed(change);
+                true
+            }
+            None => false,
+        });
+    });
 }
 
 /// Constructs a new sorter used to sort directory entries.

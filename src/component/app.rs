@@ -9,11 +9,11 @@ use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
 use tracing::*;
 
-use crate::config::State;
+use crate::config::{self, State};
 use crate::ops::Progress;
 
 use super::alert::{AlertModel, AlertMsg, ERROR_BROKER};
-use super::directory_list::{Directory, Selection};
+use super::directory_list::{refresh_hidden_filters, Directory, Selection};
 use super::file_preview::{FilePreviewModel, FilePreviewMsg};
 use super::mount::{Mount, MountMsg};
 use super::places_sidebar::PlacesSidebarModel;
@@ -172,6 +172,7 @@ impl Component for AppModel {
                     width,
                     height,
                     is_maximized,
+                    show_hidden: config::show_hidden(),
                 };
 
                 if let Err(e) = new_state.write() {
@@ -185,6 +186,9 @@ impl Component for AppModel {
 
     menu! {
         primary_menu: {
+            section! {
+                "Show hidden files" => ToggleHiddenAction,
+            },
             section! {
                 "Connect to server..." => MountAction,
             },
@@ -211,6 +215,8 @@ impl Component for AppModel {
             .unwrap_or_default();
 
         info!("starting with application state: {:?}", state);
+
+        config::set_show_hidden(state.show_hidden);
 
         let file_preview = FilePreviewModel::builder().launch(()).detach();
 
@@ -252,6 +258,23 @@ impl Component for AppModel {
         });
         group.add_action(about_action);
 
+        let toggle_sender = sender.clone();
+        let toggle_hidden_action: RelmAction<ToggleHiddenAction> =
+            RelmAction::new_stateful(&config::show_hidden(), move |_, show_hidden: &mut bool| {
+                *show_hidden = !*show_hidden;
+                config::set_show_hidden(*show_hidden);
+                refresh_hidden_filters();
+                toggle_sender.input(AppMsg::Toast(
+                    if *show_hidden {
+                        "Showing hidden files"
+                    } else {
+                        "Hiding hidden files"
+                    }
+                    .to_owned(),
+                ));
+            });
+        group.add_action(toggle_hidden_action);
+
         let mount_action: RelmAction<MountAction> = RelmAction::new_stateless(move |_| {
             sender.input(AppMsg::Mount);
         });
@@ -260,6 +283,10 @@ impl Component for AppModel {
         widgets
             .main_window
             .insert_action_group("win", Some(&group.into_action_group()));
+
+        // Same shortcut as pcmanfm's View > Show Hidden.
+        relm4::main_application()
+            .set_accels_for_action("win.toggle-hidden", &["<Control>h"]);
 
         // TODO: There's sometimes a delay in updating the adjustment upper bound when a new pane
         // is added, causing this code to not trigger at the right time. Needs more investigation.
@@ -436,6 +463,7 @@ impl Component for AppModel {
 relm4::new_action_group!(WindowActionGroup, "win");
 relm4::new_stateless_action!(AboutAction, WindowActionGroup, "about");
 relm4::new_stateless_action!(MountAction, WindowActionGroup, "mount");
+relm4::new_stateful_action!(ToggleHiddenAction, WindowActionGroup, "toggle-hidden", (), bool);
 
 /// Updates the value of an adjustment to its upper bound.
 ///

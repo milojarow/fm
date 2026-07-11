@@ -1,10 +1,25 @@
 use std::fs::{self, File};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tracing::*;
+
+/// Whether hidden files are currently shown. Global because every directory
+/// panel's filter and the window action need to agree on it.
+static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Returns whether hidden files are currently shown.
+pub fn show_hidden() -> bool {
+    SHOW_HIDDEN.load(Ordering::Relaxed)
+}
+
+/// Sets whether hidden files are shown.
+pub fn set_show_hidden(show: bool) {
+    SHOW_HIDDEN.store(show, Ordering::Relaxed);
+}
 
 /// Application state that is not intended to be directly configurable by the user. The state is
 /// converted to and from JSON, and stored in the platform's application directory. It is not
@@ -23,6 +38,9 @@ pub struct State {
 
     /// Whether the window should be maximized at startup.
     pub is_maximized: bool,
+
+    /// Whether hidden files should be shown at startup.
+    pub show_hidden: bool,
 }
 
 impl State {
@@ -51,6 +69,7 @@ impl Default for State {
             width: 900,
             height: 600,
             is_maximized: false,
+            show_hidden: false,
         }
     }
 }
