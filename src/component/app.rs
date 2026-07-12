@@ -373,10 +373,13 @@ impl Component for AppModel {
                 return glib::Propagation::Proceed;
             };
 
-            // Let text entries (rename, search, ...) keep their keys.
-            if gtk::prelude::GtkWindowExt::focus(&window)
-                .is_some_and(|focus| focus.is::<gtk::Text>() || focus.is::<gtk::Entry>())
-            {
+            // Let text entries (rename, search, ...) and open popovers (menus,
+            // rename) keep their keys.
+            if gtk::prelude::GtkWindowExt::focus(&window).is_some_and(|focus| {
+                focus.is::<gtk::Text>()
+                    || focus.is::<gtk::Entry>()
+                    || focus.ancestor(gtk::Popover::static_type()).is_some()
+            }) {
                 pending_sort.set(false);
                 return glib::Propagation::Proceed;
             }
@@ -425,7 +428,7 @@ impl Component for AppModel {
                     key_sender.input(AppMsg::NavMove(-1));
                     glib::Propagation::Stop
                 }
-                gdk::Key::l => {
+                gdk::Key::l | gdk::Key::Return | gdk::Key::KP_Enter => {
                     key_sender.input(AppMsg::NavInto);
                     glib::Propagation::Stop
                 }
@@ -440,6 +443,10 @@ impl Component for AppModel {
                 _ => glib::Propagation::Proceed,
             }
         });
+        // Capture phase: act before the focused widget does. Keyboard focus can
+        // sit on the header's menu button while j/k move the model selection,
+        // and in bubble phase the button would swallow Return (opening the menu).
+        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         widgets.main_window.add_controller(key_controller);
 
         widgets.search_bar.connect_entry(&widgets.search_entry);
@@ -599,6 +606,8 @@ impl Component for AppModel {
                 self.search_panel = Some(self.directories.len().saturating_sub(1));
                 widgets.search_bar.set_search_mode(true);
                 widgets.search_entry.grab_focus();
+                // A previous term stays in the entry; select it so typing replaces it.
+                widgets.search_entry.select_region(0, -1);
             }
             AppMsg::SearchChanged(term) => {
                 if let Some(idx) = self.search_panel {
