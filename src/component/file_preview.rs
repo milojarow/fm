@@ -23,8 +23,8 @@ mod pdf;
 use pdf::{Pdf, PdfPageChange};
 
 /// The buffer size used to read the beginning of a file to predict its mime type and preview its
-/// contents.
-const PREVIEW_BUFFER_SIZE: usize = 4096;
+/// contents. Large enough to read most text files whole, so the preview works as a reader.
+const PREVIEW_BUFFER_SIZE: usize = 256 * 1024;
 
 /// Date format used when a single file is selected.
 const LONG_DATE_FORMAT: &str = "%A, %B %-d, %Y at %-I:%M %p";
