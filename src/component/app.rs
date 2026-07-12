@@ -56,6 +56,15 @@ impl AppModel {
             .expect("there must be at least one directory listed")
             .dir()
     }
+
+    /// Returns the index of the deepest panel holding the cursor (a selection).
+    fn cursor_panel(&self) -> Option<usize> {
+        (0..self.directories.len()).rev().find(|&idx| {
+            self.directories
+                .get(idx)
+                .is_some_and(|dir| matches!(dir.selection(), Selection::Files(_)))
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -118,6 +127,15 @@ pub enum AppMsg {
 
     /// Open the rename popover for the selected entry.
     RenameSelected,
+
+    /// Move the cursor down (`j`) or up (`k`) within the current panel.
+    NavMove(i32),
+
+    /// Descend into the selected directory, or open the selected file (`l`).
+    NavInto,
+
+    /// Move the cursor to the parent panel; at the root column, go up one level (`h`).
+    NavParent,
 }
 
 #[relm4::component(pub)]
@@ -399,6 +417,22 @@ impl Component for AppModel {
                     key_sender.input(AppMsg::SearchPrev);
                     glib::Propagation::Stop
                 }
+                gdk::Key::j => {
+                    key_sender.input(AppMsg::NavMove(1));
+                    glib::Propagation::Stop
+                }
+                gdk::Key::k => {
+                    key_sender.input(AppMsg::NavMove(-1));
+                    glib::Propagation::Stop
+                }
+                gdk::Key::l => {
+                    key_sender.input(AppMsg::NavInto);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::h => {
+                    key_sender.input(AppMsg::NavParent);
+                    glib::Propagation::Stop
+                }
                 gdk::Key::F2 => {
                     key_sender.input(AppMsg::RenameSelected);
                     glib::Propagation::Stop
@@ -426,7 +460,7 @@ impl Component for AppModel {
         &mut self,
         widgets: &mut Self::Widgets,
         msg: Self::Input,
-        _sender: ComponentSender<Self>,
+        sender: ComponentSender<Self>,
         _: &Self::Root,
     ) {
         self.update_directory_scroll_position = false;
@@ -621,15 +655,46 @@ impl Component for AppModel {
                 widgets.toast_overlay.add_toast(toast);
             }
             AppMsg::RenameSelected => {
-                for idx in (0..self.directories.len()).rev() {
-                    let has_selection = self
-                        .directories
-                        .get(idx)
-                        .is_some_and(|dir| matches!(dir.selection(), Selection::Files(_)));
-
-                    if has_selection {
-                        self.directories.send(idx, DirectoryMessage::RenameSelected);
-                        break;
+                if let Some(idx) = self.cursor_panel() {
+                    self.directories.send(idx, DirectoryMessage::RenameSelected);
+                }
+            }
+            AppMsg::NavMove(delta) => {
+                match self.cursor_panel() {
+                    Some(idx) => self.directories.send(idx, DirectoryMessage::MoveCursor(delta)),
+                    // No cursor yet: enter the deepest listing at one of its ends.
+                    None => {
+                        let idx = self.directories.len().saturating_sub(1);
+                        let msg = if delta >= 0 {
+                            DirectoryMessage::SelectFirst
+                        } else {
+                            DirectoryMessage::SelectLast
+                        };
+                        self.directories.send(idx, msg);
+                    }
+                }
+            }
+            AppMsg::NavInto => {
+                if let Some(idx) = self.cursor_panel() {
+                    if idx + 1 < self.directories.len() {
+                        // The selection is a directory: its listing is the next panel.
+                        self.directories.send(idx + 1, DirectoryMessage::SelectFirst);
+                    } else {
+                        // The selection is a file (files never push a panel).
+                        self.directories.send(idx, DirectoryMessage::OpenSelected);
+                    }
+                }
+            }
+            AppMsg::NavParent => {
+                match self.cursor_panel() {
+                    Some(idx) if idx > 0 => {
+                        self.directories.send(idx, DirectoryMessage::UnselectAll);
+                    }
+                    // Cursor on the root column (or nowhere): go up one level.
+                    _ => {
+                        if let Some(parent) = self.root.parent() {
+                            sender.input(AppMsg::NewRoot(parent));
+                        }
                     }
                 }
             }

@@ -98,7 +98,7 @@ impl Directory {
     }
 
     /// Selects the entry at `pos` and scrolls it into view.
-    fn jump_to_match(&self, list_view: &gtk::ListView, pos: u32) {
+    fn select_and_scroll(&self, list_view: &gtk::ListView, pos: u32) {
         self.list_model.select_item(pos, true);
         let _ = list_view.activate_action("list.scroll-to-item", Some(&pos.to_variant()));
     }
@@ -172,6 +172,21 @@ pub enum DirectoryMessage {
 
     /// Open the rename popover for the currently selected entry.
     RenameSelected,
+
+    /// Move the cursor (selection) by the given delta within this panel.
+    MoveCursor(i32),
+
+    /// Put the cursor on the first entry.
+    SelectFirst,
+
+    /// Put the cursor on the last entry.
+    SelectLast,
+
+    /// Unselect everything, moving the cursor out of this panel.
+    UnselectAll,
+
+    /// Open the currently selected entry with its default application.
+    OpenSelected,
 }
 
 #[relm4::factory(pub)]
@@ -511,7 +526,7 @@ impl FactoryComponent for Directory {
                 self.search_current = 0;
 
                 if let Some(&pos) = self.search_matches.first() {
-                    self.jump_to_match(&widgets.list_view, pos);
+                    self.select_and_scroll(&widgets.list_view, pos);
                 }
 
                 refresh_highlights(&widgets.list_view);
@@ -520,7 +535,7 @@ impl FactoryComponent for Directory {
                 self.recompute_matches();
                 if !self.search_matches.is_empty() {
                     self.search_current = (self.search_current + 1) % self.search_matches.len();
-                    self.jump_to_match(&widgets.list_view, self.search_matches[self.search_current]);
+                    self.select_and_scroll(&widgets.list_view, self.search_matches[self.search_current]);
                 }
             }
             DirectoryMessage::SearchPrev => {
@@ -530,7 +545,7 @@ impl FactoryComponent for Directory {
                         .search_current
                         .checked_sub(1)
                         .unwrap_or(self.search_matches.len() - 1);
-                    self.jump_to_match(&widgets.list_view, self.search_matches[self.search_current]);
+                    self.select_and_scroll(&widgets.list_view, self.search_matches[self.search_current]);
                 }
             }
             DirectoryMessage::ClearSearch => {
@@ -555,6 +570,43 @@ impl FactoryComponent for Directory {
                         let _ = widget
                             .activate_action("directory-list.rename", Some(&uri.to_variant()));
                     }
+                }
+            }
+            DirectoryMessage::MoveCursor(delta) => {
+                let n = self.list_model.n_items();
+                if n > 0 {
+                    let selected = self.list_model.selection();
+                    let pos = if selected.is_empty() {
+                        if delta >= 0 {
+                            0
+                        } else {
+                            n - 1
+                        }
+                    } else {
+                        let current = i64::from(selected.minimum());
+                        (current + i64::from(delta)).clamp(0, i64::from(n - 1)) as u32
+                    };
+
+                    self.select_and_scroll(&widgets.list_view, pos);
+                }
+            }
+            DirectoryMessage::SelectFirst => {
+                if self.list_model.n_items() > 0 {
+                    self.select_and_scroll(&widgets.list_view, 0);
+                }
+            }
+            DirectoryMessage::SelectLast => {
+                let n = self.list_model.n_items();
+                if n > 0 {
+                    self.select_and_scroll(&widgets.list_view, n - 1);
+                }
+            }
+            DirectoryMessage::UnselectAll => {
+                self.list_model.unselect_all();
+            }
+            DirectoryMessage::OpenSelected => {
+                if let Some(info) = self.selected_file_info().first() {
+                    open_application_for_file(&info.file().unwrap(), &sender);
                 }
             }
         }

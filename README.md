@@ -16,6 +16,9 @@ ranger-inspired keys, added on top of upstream:
 
 | Key | Action |
 |---|---|
+| `j` / `k` | Move the cursor down / up in the current column |
+| `l` | Enter the selected directory, or open the selected file |
+| `h` | Go to the parent column; at the root column, go up one level |
 | `Backspace` / `Ctrl+H` | Toggle hidden files (persisted) |
 | `om` | Sort by modified — newest first; repeat to invert (persisted) |
 | `on` | Sort by name — A→Z; repeat to invert (persisted) |
