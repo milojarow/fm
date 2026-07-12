@@ -36,12 +36,27 @@ const SPACING: i32 = 2;
 /// Button number identifying the right click button on a mouse.
 const BUTTON_RIGHT_CLICK: u32 = 3;
 
-#[derive(Debug)]
+#[derive(Educe)]
+#[educe(Debug)]
 pub struct Directory {
     /// The sorted list model (with a selection) that is displayed in the list view.
     list_model: gtk::MultiSelection,
 
     new_folder_dialog: Option<Controller<NewFolderDialog>>,
+
+    /// The active search term for this panel (empty when no search is active).
+    search_term: String,
+
+    /// Positions of the entries matching the search term, in list order.
+    search_matches: Vec<u32>,
+
+    /// Index into `search_matches` of the match the cursor is on.
+    search_current: usize,
+
+    /// Weak handles to the currently bound list rows, used to reach a row's
+    /// widget (and its per-row actions, e.g. rename) from a keyboard shortcut.
+    #[educe(Debug(ignore))]
+    bound_rows: std::rc::Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, glib::WeakRef<gtk::Widget>)>>>,
 }
 
 impl Directory {
@@ -58,6 +73,34 @@ impl Directory {
     /// Returns the underlying directory list model.
     fn directory_list(&self) -> gtk::DirectoryList {
         directory_list_of(&self.list_model)
+    }
+
+    /// Recomputes the positions of the entries matching the current search term.
+    fn recompute_matches(&mut self) {
+        self.search_matches.clear();
+
+        let term = self.search_term.to_ascii_lowercase();
+        if term.is_empty() {
+            return;
+        }
+
+        for pos in 0..self.list_model.n_items() {
+            if let Some(info) = self.list_model.item(pos).and_downcast::<gio::FileInfo>() {
+                if info
+                    .display_name()
+                    .to_ascii_lowercase()
+                    .contains(term.as_str())
+                {
+                    self.search_matches.push(pos);
+                }
+            }
+        }
+    }
+
+    /// Selects the entry at `pos` and scrolls it into view.
+    fn jump_to_match(&self, list_view: &gtk::ListView, pos: u32) {
+        self.list_model.select_item(pos, true);
+        let _ = list_view.activate_action("list.scroll-to-item", Some(&pos.to_variant()));
     }
 
     /// Returns the file info for the files that are currently selected.
@@ -114,6 +157,21 @@ pub enum DirectoryMessage {
     RestoreSelectionFromTrash,
 
     ShowNewFolderDialog,
+
+    /// Set the search term: recompute matches, highlight them, jump to the first.
+    SetSearch(String),
+
+    /// Move the cursor to the next search match.
+    SearchNext,
+
+    /// Move the cursor to the previous search match.
+    SearchPrev,
+
+    /// Clear the search term and its highlights.
+    ClearSearch,
+
+    /// Open the rename popover for the currently selected entry.
+    RenameSelected,
 }
 
 #[relm4::factory(pub)]
@@ -177,6 +235,7 @@ impl FactoryComponent for Directory {
                     &**gio::FILE_ATTRIBUTE_STANDARD_CONTENT_TYPE,
                     &**gio::FILE_ATTRIBUTE_STANDARD_IS_SYMLINK,
                     &**gio::FILE_ATTRIBUTE_STANDARD_IS_HIDDEN,
+                    &**gio::FILE_ATTRIBUTE_TIME_MODIFIED,
                 ]
                 .join(","),
             ),
@@ -196,6 +255,11 @@ impl FactoryComponent for Directory {
             // This can't be initialized here, since we need make the dialog transient for
             // something but we don't have a reference to a widget here.
             new_folder_dialog: None,
+
+            search_term: String::new(),
+            search_matches: Vec::new(),
+            search_current: 0,
+            bound_rows: Default::default(),
         }
     }
 
@@ -223,16 +287,23 @@ impl FactoryComponent for Directory {
         #[allow(clippy::arc_with_non_send_sync)]
         let controllers = Arc::new(Mutex::new(HashMap::new()));
 
+        let bound_rows = self.bound_rows.clone();
         factory.connect_bind(clone!(
             #[strong]
             sender,
             #[strong]
             controllers,
+            #[strong]
+            bound_rows,
             move |_, list_item| {
                 let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
                 let widget = list_item.child().unwrap();
 
                 let info = list_item.item().and_downcast::<gio::FileInfo>().unwrap();
+
+                bound_rows
+                    .borrow_mut()
+                    .push((list_item.downgrade(), widget.downgrade()));
 
                 if matches!(info.file_type(), gio::FileType::Directory) {
                     let dir = info.file().unwrap();
@@ -243,9 +314,14 @@ impl FactoryComponent for Directory {
             }
         ));
 
+        let bound_rows = self.bound_rows.clone();
         factory.connect_unbind(move |_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             let widget = list_item.child().unwrap();
+
+            bound_rows
+                .borrow_mut()
+                .retain(|(_, w)| w.upgrade().is_some_and(|w| w != widget));
 
             if let Some(controller) = controllers.lock().unwrap().remove(&widget) {
                 widget.remove_controller(&controller);
@@ -428,6 +504,59 @@ impl FactoryComponent for Directory {
                 .as_ref()
                 .unwrap()
                 .emit(NewFolderDialogMsg::Show),
+            DirectoryMessage::SetSearch(term) => {
+                self.search_term = term;
+                set_search_term(&self.search_term);
+                self.recompute_matches();
+                self.search_current = 0;
+
+                if let Some(&pos) = self.search_matches.first() {
+                    self.jump_to_match(&widgets.list_view, pos);
+                }
+
+                refresh_highlights(&widgets.list_view);
+            }
+            DirectoryMessage::SearchNext => {
+                self.recompute_matches();
+                if !self.search_matches.is_empty() {
+                    self.search_current = (self.search_current + 1) % self.search_matches.len();
+                    self.jump_to_match(&widgets.list_view, self.search_matches[self.search_current]);
+                }
+            }
+            DirectoryMessage::SearchPrev => {
+                self.recompute_matches();
+                if !self.search_matches.is_empty() {
+                    self.search_current = self
+                        .search_current
+                        .checked_sub(1)
+                        .unwrap_or(self.search_matches.len() - 1);
+                    self.jump_to_match(&widgets.list_view, self.search_matches[self.search_current]);
+                }
+            }
+            DirectoryMessage::ClearSearch => {
+                self.search_term.clear();
+                set_search_term("");
+                self.search_matches.clear();
+                self.search_current = 0;
+                refresh_highlights(&widgets.list_view);
+            }
+            DirectoryMessage::RenameSelected => {
+                if let Some(info) = self.selected_file_info().first() {
+                    let uri = info.file().unwrap().uri().to_string();
+
+                    // Reach the selected entry's bound row widget: its per-row action
+                    // group owns the rename popover, anchored at the row itself.
+                    let row_widget = self.bound_rows.borrow().iter().find_map(|(li, w)| {
+                        let item = li.upgrade()?.item().and_downcast::<gio::FileInfo>()?;
+                        (item == *info).then(|| w.upgrade())?
+                    });
+
+                    if let Some(widget) = row_widget {
+                        let _ = widget
+                            .activate_action("directory-list.rename", Some(&uri.to_variant()));
+                    }
+                }
+            }
         }
 
         self.update_view(widgets, sender);
@@ -505,6 +634,13 @@ fn build_list_item_view(
     list_item
         .bind_property("item", &file_name, "label")
         .transform_to(|_, item: Option<gio::FileInfo>| item.map(|info| info.display_name()))
+        .build();
+
+    list_item
+        .bind_property("item", &file_name, "attributes")
+        .transform_to(|_, item: Option<gio::FileInfo>| {
+            item.map(|info| search_highlight_attrs(&info.display_name()))
+        })
         .build();
 
     list_item
@@ -889,6 +1025,76 @@ thread_local! {
     /// poked by [`refresh_hidden_filters`] when the setting toggles.
     static HIDDEN_FILTERS: RefCell<Vec<glib::WeakRef<gtk::CustomFilter>>> =
         const { RefCell::new(Vec::new()) };
+
+    /// Weak handles to the sorter of every live directory panel, poked by
+    /// [`refresh_sorters`] when the sort settings change.
+    static SORTERS: RefCell<Vec<glib::WeakRef<gtk::CustomSorter>>> =
+        const { RefCell::new(Vec::new()) };
+
+    /// The search term whose matches are highlighted in entry labels.
+    static SEARCH_TERM: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Sets the search term used to highlight matches in entry labels.
+fn set_search_term(term: &str) {
+    SEARCH_TERM.with(|t| term.clone_into(&mut t.borrow_mut()));
+}
+
+/// Forces the visible rows of a list view to re-bind, refreshing their labels'
+/// search highlights.
+fn refresh_highlights(list_view: &gtk::ListView) {
+    let factory = list_view.factory();
+    list_view.set_factory(None::<&gtk::ListItemFactory>);
+    list_view.set_factory(factory.as_ref());
+}
+
+/// Builds the pango attributes highlighting occurrences of the active search
+/// term in the given entry name.
+fn search_highlight_attrs(name: &str) -> pango::AttrList {
+    let attrs = pango::AttrList::new();
+
+    SEARCH_TERM.with(|term| {
+        let term = term.borrow().to_ascii_lowercase();
+        if term.is_empty() {
+            return;
+        }
+
+        // ASCII lowercasing never changes byte offsets, so match indices are
+        // valid in the original string.
+        for (start, matched) in name.to_ascii_lowercase().match_indices(term.as_str()) {
+            let (start, end) = (start as u32, (start + matched.len()) as u32);
+
+            let mut background = pango::AttrColor::new_background(0, 0xd5d5, 0xd5d5);
+            background.set_start_index(start);
+            background.set_end_index(end);
+            attrs.insert(background);
+
+            let mut foreground = pango::AttrColor::new_foreground(0, 0, 0);
+            foreground.set_start_index(start);
+            foreground.set_end_index(end);
+            attrs.insert(foreground);
+
+            let mut weight = pango::AttrInt::new_weight(pango::Weight::Bold);
+            weight.set_start_index(start);
+            weight.set_end_index(end);
+            attrs.insert(weight);
+        }
+    });
+
+    attrs
+}
+
+/// Re-sorts every live directory panel. Call after the sort settings change.
+pub fn refresh_sorters() {
+    SORTERS.with(|sorters| {
+        sorters.borrow_mut().retain(|weak| match weak.upgrade() {
+            Some(sorter) => {
+                sorter.changed(gtk::SorterChange::Different);
+                true
+            }
+            None => false,
+        });
+    });
 }
 
 /// Constructs a filter that hides hidden files unless [`config::show_hidden`] is set.
@@ -926,18 +1132,37 @@ pub fn refresh_hidden_filters() {
     });
 }
 
-/// Constructs a new sorter used to sort directory entries.
+/// Constructs a new sorter used to sort directory entries. The sort key and
+/// direction follow the global sort settings (see [`config`]).
 fn file_sorter() -> gtk::Sorter {
-    gtk::CustomSorter::new(move |a, b| {
+    let sorter = gtk::CustomSorter::new(move |a, b| {
         let a = a.downcast_ref::<gio::FileInfo>().unwrap();
         let b = b.downcast_ref::<gio::FileInfo>().unwrap();
 
-        a.display_name()
-            .to_lowercase()
-            .cmp(&b.display_name().to_lowercase())
-            .into()
-    })
-    .upcast()
+        let ordering = if config::sort_by_modified() {
+            let modified = |info: &gio::FileInfo| {
+                info.modification_date_time().map_or(0, |d| d.to_unix())
+            };
+
+            modified(a).cmp(&modified(b))
+        } else {
+            a.display_name()
+                .to_lowercase()
+                .cmp(&b.display_name().to_lowercase())
+        };
+
+        let ordering = if config::sort_reversed() {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+
+        ordering.into()
+    });
+
+    SORTERS.with(|sorters| sorters.borrow_mut().push(sorter.downgrade()));
+
+    sorter.upcast()
 }
 
 /// Returns a formattable object for a list of [`gio::FileInfo`] objects. Used to log the return

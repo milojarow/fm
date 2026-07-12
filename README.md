@@ -10,6 +10,21 @@ navigation throughout the hierarchy.
 `fm` is in the early stages of development. Manipulating important files with it
 risks data loss.
 
+## Keybindings (this fork)
+
+ranger-inspired keys, added on top of upstream:
+
+| Key | Action |
+|---|---|
+| `Backspace` / `Ctrl+H` | Toggle hidden files (persisted) |
+| `om` | Sort by modified — newest first; repeat to invert (persisted) |
+| `on` | Sort by name — A→Z; repeat to invert (persisted) |
+| `/` | Incremental search in the deepest panel; matches are highlighted |
+| `Enter` (in search) | Confirm term, return focus to the list |
+| `n` / `N` | Jump to next / previous search match |
+| `Escape` (in search) | Cancel search and clear highlights |
+| `F2` | Rename the selected entry |
+
 ## Platform support
 
 Development is currently focused on Linux, but bug reports for other platforms

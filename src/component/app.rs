@@ -3,7 +3,7 @@
 use std::convert::identity;
 use std::path::{self, PathBuf};
 
-use gtk::{gio, glib, prelude::*};
+use gtk::{gdk, gio, glib, prelude::*};
 use relm4::actions::{RelmAction, RelmActionGroup};
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
@@ -13,7 +13,9 @@ use crate::config::{self, State};
 use crate::ops::Progress;
 
 use super::alert::{AlertModel, AlertMsg, ERROR_BROKER};
-use super::directory_list::{refresh_hidden_filters, Directory, Selection};
+use super::directory_list::{
+    refresh_hidden_filters, refresh_sorters, Directory, DirectoryMessage, Selection,
+};
 use super::file_preview::{FilePreviewModel, FilePreviewMsg};
 use super::mount::{Mount, MountMsg};
 use super::places_sidebar::PlacesSidebarModel;
@@ -39,6 +41,9 @@ pub struct AppModel {
     /// Whether the directory panes scroll window should update its scroll position to the upper
     /// bound on the next view update.
     update_directory_scroll_position: bool,
+
+    /// The index of the directory panel an active search applies to.
+    search_panel: Option<usize>,
 
     state: State,
 }
@@ -89,6 +94,30 @@ pub enum AppMsg {
 
     /// Launch a dialog to mount a new mountable.
     Mount,
+
+    /// Open the search bar for the deepest directory panel.
+    SearchOpen,
+
+    /// The search term changed.
+    SearchChanged(String),
+
+    /// The search term was confirmed: move focus away so `n`/`N` navigate matches.
+    SearchConfirm,
+
+    /// Cancel the search and clear its highlights.
+    SearchCancel,
+
+    /// Move to the next search match.
+    SearchNext,
+
+    /// Move to the previous search match.
+    SearchPrev,
+
+    /// Sort by modification time or name; selecting the active key reverses the order.
+    SetSort { by_modified: bool },
+
+    /// Open the rename popover for the selected entry.
+    RenameSelected,
 }
 
 #[relm4::component(pub)]
@@ -159,6 +188,27 @@ impl Component for AppModel {
                                     append: file_preview.widget(),
                                 },
                             },
+
+                            #[name = "search_bar"]
+                            gtk::SearchBar {
+                                #[wrap(Some)]
+                                #[name = "search_entry"]
+                                set_child = &gtk::SearchEntry {
+                                    set_placeholder_text: Some("Search this directory..."),
+
+                                    connect_search_changed[sender] => move |entry| {
+                                        sender.input(AppMsg::SearchChanged(entry.text().to_string()));
+                                    },
+
+                                    connect_activate[sender] => move |_| {
+                                        sender.input(AppMsg::SearchConfirm);
+                                    },
+
+                                    connect_stop_search[sender] => move |_| {
+                                        sender.input(AppMsg::SearchCancel);
+                                    },
+                                },
+                            },
                         },
                     },
                 },
@@ -173,6 +223,8 @@ impl Component for AppModel {
                     height,
                     is_maximized,
                     show_hidden: config::show_hidden(),
+                    sort_by_modified: config::sort_by_modified(),
+                    sort_reversed: config::sort_reversed(),
                 };
 
                 if let Err(e) = new_state.write() {
@@ -217,6 +269,8 @@ impl Component for AppModel {
         info!("starting with application state: {:?}", state);
 
         config::set_show_hidden(state.show_hidden);
+        config::set_sort_by_modified(state.sort_by_modified);
+        config::set_sort_reversed(state.sort_reversed);
 
         let file_preview = FilePreviewModel::builder().launch(()).detach();
 
@@ -245,6 +299,7 @@ impl Component for AppModel {
             file_preview,
             _places_sidebar: places_sidebar,
             update_directory_scroll_position: false,
+            search_panel: None,
             state,
         };
 
@@ -275,6 +330,8 @@ impl Component for AppModel {
             });
         group.add_action(toggle_hidden_action);
 
+        let key_sender = sender.clone();
+
         let mount_action: RelmAction<MountAction> = RelmAction::new_stateless(move |_| {
             sender.input(AppMsg::Mount);
         });
@@ -284,9 +341,74 @@ impl Component for AppModel {
             .main_window
             .insert_action_group("win", Some(&group.into_action_group()));
 
-        // Same shortcut as pcmanfm's View > Show Hidden.
+        // Also a ranger default (`<C-h>`), alongside Backspace below.
         relm4::main_application()
             .set_accels_for_action("win.toggle-hidden", &["<Control>h"]);
+
+        // ranger-style keys: Backspace (hidden files), / n N (search), o+m / o+n
+        // (sort by modified / name), F2 (rename).
+        let key_controller = gtk::EventControllerKey::new();
+        let pending_sort = std::rc::Rc::new(std::cell::Cell::new(false));
+        let window = widgets.main_window.downgrade();
+        key_controller.connect_key_pressed(move |_, keyval, _, state| {
+            let Some(window) = window.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+
+            // Let text entries (rename, search, ...) keep their keys.
+            if gtk::prelude::GtkWindowExt::focus(&window)
+                .is_some_and(|focus| focus.is::<gtk::Text>() || focus.is::<gtk::Entry>())
+            {
+                pending_sort.set(false);
+                return glib::Propagation::Proceed;
+            }
+
+            if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+
+            if pending_sort.take() {
+                match keyval {
+                    gdk::Key::m => key_sender.input(AppMsg::SetSort { by_modified: true }),
+                    gdk::Key::n => key_sender.input(AppMsg::SetSort { by_modified: false }),
+                    // A repeated prefix re-arms instead of cancelling.
+                    gdk::Key::o => pending_sort.set(true),
+                    _ => {}
+                }
+                return glib::Propagation::Stop;
+            }
+
+            match keyval {
+                gdk::Key::BackSpace => {
+                    let _ = window.activate_action("win.toggle-hidden", None);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::slash => {
+                    key_sender.input(AppMsg::SearchOpen);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::o => {
+                    pending_sort.set(true);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::n => {
+                    key_sender.input(AppMsg::SearchNext);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::N => {
+                    key_sender.input(AppMsg::SearchPrev);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::F2 => {
+                    key_sender.input(AppMsg::RenameSelected);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        widgets.main_window.add_controller(key_controller);
+
+        widgets.search_bar.connect_entry(&widgets.search_entry);
 
         // TODO: There's sometimes a delay in updating the adjustment upper bound when a new pane
         // is added, causing this code to not trigger at the right time. Needs more investigation.
@@ -439,6 +561,78 @@ impl Component for AppModel {
                     .show();
             }
             AppMsg::Mount => self.mount.emit(MountMsg::Mount),
+            AppMsg::SearchOpen => {
+                self.search_panel = Some(self.directories.len().saturating_sub(1));
+                widgets.search_bar.set_search_mode(true);
+                widgets.search_entry.grab_focus();
+            }
+            AppMsg::SearchChanged(term) => {
+                if let Some(idx) = self.search_panel {
+                    if idx < self.directories.len() {
+                        self.directories.send(idx, DirectoryMessage::SetSearch(term));
+                    }
+                }
+            }
+            AppMsg::SearchConfirm => {
+                gtk::prelude::GtkWindowExt::set_focus(&widgets.main_window, None::<&gtk::Widget>);
+            }
+            AppMsg::SearchCancel => {
+                if let Some(idx) = self.search_panel.take() {
+                    if idx < self.directories.len() {
+                        self.directories.send(idx, DirectoryMessage::ClearSearch);
+                    }
+                }
+                widgets.search_bar.set_search_mode(false);
+                gtk::prelude::GtkWindowExt::set_focus(&widgets.main_window, None::<&gtk::Widget>);
+            }
+            AppMsg::SearchNext => {
+                if let Some(idx) = self.search_panel {
+                    if idx < self.directories.len() {
+                        self.directories.send(idx, DirectoryMessage::SearchNext);
+                    }
+                }
+            }
+            AppMsg::SearchPrev => {
+                if let Some(idx) = self.search_panel {
+                    if idx < self.directories.len() {
+                        self.directories.send(idx, DirectoryMessage::SearchPrev);
+                    }
+                }
+            }
+            AppMsg::SetSort { by_modified } => {
+                if config::sort_by_modified() == by_modified {
+                    config::set_sort_reversed(!config::sort_reversed());
+                } else {
+                    config::set_sort_by_modified(by_modified);
+                    // Modified starts newest-first; name starts A -> Z.
+                    config::set_sort_reversed(by_modified);
+                }
+                refresh_sorters();
+
+                let description = match (by_modified, config::sort_reversed()) {
+                    (true, true) => "Sort: modified (newest first)",
+                    (true, false) => "Sort: modified (oldest first)",
+                    (false, false) => "Sort: name (A\u{2192}Z)",
+                    (false, true) => "Sort: name (Z\u{2192}A)",
+                };
+                let toast = adw::Toast::new(description);
+                // Replace any queued toast so rapid re-sorts give live feedback.
+                toast.set_priority(adw::ToastPriority::High);
+                widgets.toast_overlay.add_toast(toast);
+            }
+            AppMsg::RenameSelected => {
+                for idx in (0..self.directories.len()).rev() {
+                    let has_selection = self
+                        .directories
+                        .get(idx)
+                        .is_some_and(|dir| matches!(dir.selection(), Selection::Files(_)));
+
+                    if has_selection {
+                        self.directories.send(idx, DirectoryMessage::RenameSelected);
+                        break;
+                    }
+                }
+            }
         }
     }
 

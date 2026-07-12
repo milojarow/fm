@@ -11,6 +11,12 @@ use tracing::*;
 /// panel's filter and the window action need to agree on it.
 static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
 
+/// Whether entries are sorted by modification time (`true`) or by name (`false`).
+static SORT_BY_MODIFIED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the current sort order is reversed.
+static SORT_REVERSED: AtomicBool = AtomicBool::new(false);
+
 /// Returns whether hidden files are currently shown.
 pub fn show_hidden() -> bool {
     SHOW_HIDDEN.load(Ordering::Relaxed)
@@ -19,6 +25,26 @@ pub fn show_hidden() -> bool {
 /// Sets whether hidden files are shown.
 pub fn set_show_hidden(show: bool) {
     SHOW_HIDDEN.store(show, Ordering::Relaxed);
+}
+
+/// Returns whether entries are sorted by modification time.
+pub fn sort_by_modified() -> bool {
+    SORT_BY_MODIFIED.load(Ordering::Relaxed)
+}
+
+/// Sets whether entries are sorted by modification time.
+pub fn set_sort_by_modified(by_modified: bool) {
+    SORT_BY_MODIFIED.store(by_modified, Ordering::Relaxed);
+}
+
+/// Returns whether the sort order is reversed.
+pub fn sort_reversed() -> bool {
+    SORT_REVERSED.load(Ordering::Relaxed)
+}
+
+/// Sets whether the sort order is reversed.
+pub fn set_sort_reversed(reversed: bool) {
+    SORT_REVERSED.store(reversed, Ordering::Relaxed);
 }
 
 /// Application state that is not intended to be directly configurable by the user. The state is
@@ -41,6 +67,12 @@ pub struct State {
 
     /// Whether hidden files should be shown at startup.
     pub show_hidden: bool,
+
+    /// Whether entries should be sorted by modification time at startup.
+    pub sort_by_modified: bool,
+
+    /// Whether the sort order should be reversed at startup.
+    pub sort_reversed: bool,
 }
 
 impl State {
@@ -70,6 +102,8 @@ impl Default for State {
             height: 600,
             is_maximized: false,
             show_hidden: false,
+            sort_by_modified: false,
+            sort_reversed: false,
         }
     }
 }
