@@ -98,9 +98,28 @@ impl Directory {
     }
 
     /// Selects the entry at `pos` and scrolls it into view.
-    fn select_and_scroll(&self, list_view: &gtk::ListView, pos: u32) {
+    ///
+    /// The list view sits inside a Box (which hosts the context menu popover)
+    /// inside the scrolled window, so its own Scrollable interface dangles and
+    /// `list.scroll-to-item` is a no-op; the outer scrolled window owns the
+    /// scroll position. Rows are uniform, so the row extent is plain arithmetic.
+    fn select_and_scroll(&self, scroller: &gtk::ScrolledWindow, pos: u32) {
         self.list_model.select_item(pos, true);
-        let _ = list_view.activate_action("list.scroll-to-item", Some(&pos.to_variant()));
+
+        let n = self.list_model.n_items();
+        if n == 0 {
+            return;
+        }
+
+        let vadj = scroller.vadjustment();
+        let row_height = vadj.upper() / f64::from(n);
+        let (row_top, row_bottom) = (f64::from(pos) * row_height, f64::from(pos + 1) * row_height);
+
+        if row_top < vadj.value() {
+            vadj.set_value(row_top);
+        } else if row_bottom > vadj.value() + vadj.page_size() {
+            vadj.set_value(row_bottom - vadj.page_size());
+        }
     }
 
     /// Returns the file info for the files that are currently selected.
@@ -208,6 +227,7 @@ impl FactoryComponent for Directory {
                 set_spinning: true,
             } -> { set_name: "spinner" },
 
+            #[name = "scroller"]
             add_child = &gtk::ScrolledWindow {
                 set_hscrollbar_policy: gtk::PolicyType::Never,
 
@@ -526,7 +546,7 @@ impl FactoryComponent for Directory {
                 self.search_current = 0;
 
                 if let Some(&pos) = self.search_matches.first() {
-                    self.select_and_scroll(&widgets.list_view, pos);
+                    self.select_and_scroll(&widgets.scroller, pos);
                 }
 
                 refresh_highlights(&widgets.list_view);
@@ -535,7 +555,7 @@ impl FactoryComponent for Directory {
                 self.recompute_matches();
                 if !self.search_matches.is_empty() {
                     self.search_current = (self.search_current + 1) % self.search_matches.len();
-                    self.select_and_scroll(&widgets.list_view, self.search_matches[self.search_current]);
+                    self.select_and_scroll(&widgets.scroller, self.search_matches[self.search_current]);
                 }
             }
             DirectoryMessage::SearchPrev => {
@@ -545,7 +565,7 @@ impl FactoryComponent for Directory {
                         .search_current
                         .checked_sub(1)
                         .unwrap_or(self.search_matches.len() - 1);
-                    self.select_and_scroll(&widgets.list_view, self.search_matches[self.search_current]);
+                    self.select_and_scroll(&widgets.scroller, self.search_matches[self.search_current]);
                 }
             }
             DirectoryMessage::ClearSearch => {
@@ -587,18 +607,18 @@ impl FactoryComponent for Directory {
                         (current + i64::from(delta)).clamp(0, i64::from(n - 1)) as u32
                     };
 
-                    self.select_and_scroll(&widgets.list_view, pos);
+                    self.select_and_scroll(&widgets.scroller, pos);
                 }
             }
             DirectoryMessage::SelectFirst => {
                 if self.list_model.n_items() > 0 {
-                    self.select_and_scroll(&widgets.list_view, 0);
+                    self.select_and_scroll(&widgets.scroller, 0);
                 }
             }
             DirectoryMessage::SelectLast => {
                 let n = self.list_model.n_items();
                 if n > 0 {
-                    self.select_and_scroll(&widgets.list_view, n - 1);
+                    self.select_and_scroll(&widgets.scroller, n - 1);
                 }
             }
             DirectoryMessage::UnselectAll => {
