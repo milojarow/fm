@@ -57,16 +57,7 @@ impl Directory {
 
     /// Returns the underlying directory list model.
     fn directory_list(&self) -> gtk::DirectoryList {
-        self.list_model
-            .model()
-            .and_downcast::<gtk::SortListModel>()
-            .unwrap()
-            .model()
-            .and_downcast::<gtk::FilterListModel>()
-            .unwrap()
-            .model()
-            .and_downcast()
-            .unwrap()
+        directory_list_of(&self.list_model)
     }
 
     /// Returns the file info for the files that are currently selected.
@@ -766,6 +757,22 @@ fn new_drop_target_for_dir(dir: gio::File, sender: FactorySender<Directory>) -> 
     drop_target
 }
 
+/// Walks the list model chain (multi selection → sorter → hidden-files filter)
+/// down to the underlying [`gtk::DirectoryList`]. Must mirror the chain built
+/// in [`Directory`]'s `init_model`.
+fn directory_list_of(selection: &gtk::MultiSelection) -> gtk::DirectoryList {
+    selection
+        .model()
+        .and_downcast::<gtk::SortListModel>()
+        .unwrap()
+        .model()
+        .and_downcast::<gtk::FilterListModel>()
+        .unwrap()
+        .model()
+        .and_downcast()
+        .unwrap()
+}
+
 /// Construct a new [`Selection`] from the given list model.
 fn build_selection(selection: &gtk::MultiSelection) -> Selection {
     let selected_set = selection.selection();
@@ -773,15 +780,7 @@ fn build_selection(selection: &gtk::MultiSelection) -> Selection {
     if selected_set.is_empty() {
         Selection::None
     } else {
-        let directory_list = selection
-            .model()
-            .unwrap()
-            .downcast::<gtk::SortListModel>()
-            .unwrap()
-            .model()
-            .unwrap()
-            .downcast::<gtk::DirectoryList>()
-            .unwrap();
+        let directory_list = directory_list_of(selection);
         let dir = directory_list.file().unwrap();
 
         let files = selected_set
