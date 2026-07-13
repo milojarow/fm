@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
@@ -11,11 +11,35 @@ use tracing::*;
 /// panel's filter and the window action need to agree on it.
 static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
 
-/// Whether entries are sorted by modification time (`true`) or by name (`false`).
-static SORT_BY_MODIFIED: AtomicBool = AtomicBool::new(false);
+/// The active sort key, stored as its discriminant.
+static SORT_KEY: AtomicU8 = AtomicU8::new(SortKey::Name as u8);
 
 /// Whether the current sort order is reversed.
 static SORT_REVERSED: AtomicBool = AtomicBool::new(false);
+
+/// What directory entries are ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum SortKey {
+    /// Case-insensitive name.
+    #[default]
+    Name = 0,
+    /// Modification time.
+    Modified = 1,
+    /// Directories first, then grouped by content type; name breaks ties.
+    Type = 2,
+}
+
+impl SortKey {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => SortKey::Modified,
+            2 => SortKey::Type,
+            _ => SortKey::Name,
+        }
+    }
+}
 
 /// Returns whether hidden files are currently shown.
 pub fn show_hidden() -> bool {
@@ -27,14 +51,14 @@ pub fn set_show_hidden(show: bool) {
     SHOW_HIDDEN.store(show, Ordering::Relaxed);
 }
 
-/// Returns whether entries are sorted by modification time.
-pub fn sort_by_modified() -> bool {
-    SORT_BY_MODIFIED.load(Ordering::Relaxed)
+/// Returns the active sort key.
+pub fn sort_key() -> SortKey {
+    SortKey::from_u8(SORT_KEY.load(Ordering::Relaxed))
 }
 
-/// Sets whether entries are sorted by modification time.
-pub fn set_sort_by_modified(by_modified: bool) {
-    SORT_BY_MODIFIED.store(by_modified, Ordering::Relaxed);
+/// Sets the active sort key.
+pub fn set_sort_key(key: SortKey) {
+    SORT_KEY.store(key as u8, Ordering::Relaxed);
 }
 
 /// Returns whether the sort order is reversed.
@@ -68,8 +92,8 @@ pub struct State {
     /// Whether hidden files should be shown at startup.
     pub show_hidden: bool,
 
-    /// Whether entries should be sorted by modification time at startup.
-    pub sort_by_modified: bool,
+    /// The sort key entries should be ordered by at startup.
+    pub sort_key: SortKey,
 
     /// Whether the sort order should be reversed at startup.
     pub sort_reversed: bool,
@@ -102,7 +126,7 @@ impl Default for State {
             height: 600,
             is_maximized: false,
             show_hidden: false,
-            sort_by_modified: false,
+            sort_key: SortKey::default(),
             sort_reversed: false,
         }
     }

@@ -1211,16 +1211,29 @@ fn file_sorter() -> gtk::Sorter {
         let a = a.downcast_ref::<gio::FileInfo>().unwrap();
         let b = b.downcast_ref::<gio::FileInfo>().unwrap();
 
-        let ordering = if config::sort_by_modified() {
-            let modified = |info: &gio::FileInfo| {
-                info.modification_date_time().map_or(0, |d| d.to_unix())
-            };
+        let name = |info: &gio::FileInfo| info.display_name().to_lowercase();
 
-            modified(a).cmp(&modified(b))
-        } else {
-            a.display_name()
-                .to_lowercase()
-                .cmp(&b.display_name().to_lowercase())
+        let ordering = match config::sort_key() {
+            config::SortKey::Name => name(a).cmp(&name(b)),
+            config::SortKey::Modified => {
+                let modified = |info: &gio::FileInfo| {
+                    info.modification_date_time().map_or(0, |d| d.to_unix())
+                };
+
+                modified(a).cmp(&modified(b))
+            }
+            config::SortKey::Type => {
+                // Directories first, then grouped by content type, name as the
+                // tie-breaker.
+                let file_rank =
+                    |info: &gio::FileInfo| u8::from(info.file_type() != gio::FileType::Directory);
+                let content_type = |info: &gio::FileInfo| info.content_type().unwrap_or_default();
+
+                file_rank(a)
+                    .cmp(&file_rank(b))
+                    .then_with(|| content_type(a).cmp(&content_type(b)))
+                    .then_with(|| name(a).cmp(&name(b)))
+            }
         };
 
         let ordering = if config::sort_reversed() {

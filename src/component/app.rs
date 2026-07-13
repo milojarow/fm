@@ -146,8 +146,8 @@ pub enum AppMsg {
     /// Move to the previous search match.
     SearchPrev,
 
-    /// Sort by modification time or name; selecting the active key reverses the order.
-    SetSort { by_modified: bool },
+    /// Sort by the given key; selecting the already-active key reverses the order.
+    SetSort(config::SortKey),
 
     /// Open the rename popover for the selected entry.
     RenameSelected,
@@ -286,7 +286,7 @@ impl Component for AppModel {
                     height,
                     is_maximized,
                     show_hidden: config::show_hidden(),
-                    sort_by_modified: config::sort_by_modified(),
+                    sort_key: config::sort_key(),
                     sort_reversed: config::sort_reversed(),
                 };
 
@@ -332,7 +332,7 @@ impl Component for AppModel {
         info!("starting with application state: {:?}", state);
 
         config::set_show_hidden(state.show_hidden);
-        config::set_sort_by_modified(state.sort_by_modified);
+        config::set_sort_key(state.sort_key);
         config::set_sort_reversed(state.sort_reversed);
 
         let file_preview = FilePreviewModel::builder().launch(()).detach();
@@ -438,8 +438,9 @@ impl Component for AppModel {
 
             if pending_sort.take() {
                 match keyval {
-                    gdk::Key::m => key_sender.input(AppMsg::SetSort { by_modified: true }),
-                    gdk::Key::n => key_sender.input(AppMsg::SetSort { by_modified: false }),
+                    gdk::Key::m => key_sender.input(AppMsg::SetSort(config::SortKey::Modified)),
+                    gdk::Key::n => key_sender.input(AppMsg::SetSort(config::SortKey::Name)),
+                    gdk::Key::t => key_sender.input(AppMsg::SetSort(config::SortKey::Type)),
                     // A repeated prefix re-arms instead of cancelling.
                     gdk::Key::o => pending_sort.set(true),
                     _ => {}
@@ -705,21 +706,23 @@ impl Component for AppModel {
                     }
                 }
             }
-            AppMsg::SetSort { by_modified } => {
-                if config::sort_by_modified() == by_modified {
+            AppMsg::SetSort(key) => {
+                if config::sort_key() == key {
                     config::set_sort_reversed(!config::sort_reversed());
                 } else {
-                    config::set_sort_by_modified(by_modified);
-                    // Modified starts newest-first; name starts A -> Z.
-                    config::set_sort_reversed(by_modified);
+                    config::set_sort_key(key);
+                    // Modified starts newest-first; name and type start ascending.
+                    config::set_sort_reversed(key == config::SortKey::Modified);
                 }
                 refresh_sorters();
 
-                let description = match (by_modified, config::sort_reversed()) {
-                    (true, true) => "Sort: modified (newest first)",
-                    (true, false) => "Sort: modified (oldest first)",
-                    (false, false) => "Sort: name (A\u{2192}Z)",
-                    (false, true) => "Sort: name (Z\u{2192}A)",
+                let description = match (key, config::sort_reversed()) {
+                    (config::SortKey::Modified, true) => "Sort: modified (newest first)",
+                    (config::SortKey::Modified, false) => "Sort: modified (oldest first)",
+                    (config::SortKey::Name, false) => "Sort: name (A\u{2192}Z)",
+                    (config::SortKey::Name, true) => "Sort: name (Z\u{2192}A)",
+                    (config::SortKey::Type, false) => "Sort: type (dirs first)",
+                    (config::SortKey::Type, true) => "Sort: type (reversed)",
                 };
                 self.show_toast(widgets, description);
             }

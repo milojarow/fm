@@ -23,6 +23,7 @@ ranger-inspired keys, added on top of upstream:
 | `Backspace` / `Ctrl+H` | Toggle hidden files (persisted) |
 | `om` | Sort by modified — newest first; repeat to invert (persisted) |
 | `on` | Sort by name — A→Z; repeat to invert (persisted) |
+| `ot` | Sort by type — dirs first, grouped by content type, name as tie-breaker; repeat to invert (persisted) |
 | `/` | Incremental search in the deepest panel; matches are highlighted |
 | `Enter` (in search) | Confirm term, return focus to the list |
 | `n` / `N` | Jump to next / previous search match |
