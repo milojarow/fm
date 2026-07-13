@@ -125,14 +125,20 @@ impl Directory {
             return;
         }
 
-        if let Some(old) = self.cursor.get() {
-            if old != pos && !self.cursor_marked {
-                self.list_model.unselect_item(old);
+        // Only a real arrival re-derives the mark state: a clamped move that
+        // stays on the same row (j at the bottom edge, k at the top) must not
+        // mistake the cursor's own selection for a mark.
+        if self.cursor.get() != Some(pos) {
+            if let Some(old) = self.cursor.get() {
+                if !self.cursor_marked {
+                    self.list_model.unselect_item(old);
+                }
             }
+
+            // Arriving on an already-selected row means it was marked earlier.
+            self.cursor_marked = self.list_model.is_selected(pos);
         }
 
-        // Arriving on an already-selected row means it was marked earlier.
-        self.cursor_marked = self.list_model.is_selected(pos);
         self.cursor.set(Some(pos));
         self.list_model.select_item(pos, false);
 
