@@ -70,6 +70,10 @@ pub struct FilePreviewModel {
     file_type_text: String,
     created_text: String,
     modified_text: String,
+
+    /// Whether the current selection is led by the keyboard cursor: previews
+    /// then show the cursor file, annotated with the batch totals.
+    cursor_leads: bool,
 }
 
 impl FilePreviewModel {
@@ -78,7 +82,7 @@ impl FilePreviewModel {
         widgets: &mut FilePreviewWidgets,
         sender: ComponentSender<Self>,
     ) {
-        assert!(self.info.len() == 1);
+        assert!(!self.info.is_empty());
         let file = &self.info[0];
 
         self.file_name_text = file.info.display_name().to_string();
@@ -352,6 +356,7 @@ impl Component for FilePreviewModel {
         let model = FilePreviewModel {
             info: vec![],
             abort_preview: None,
+            cursor_leads: false,
             created_text: String::new(),
             file_name_text: String::new(),
             file_type_text: String::new(),
@@ -390,6 +395,8 @@ impl Component for FilePreviewModel {
                 return;
             }
             FilePreviewMsg::NewSelection(selection) => {
+                self.cursor_leads = selection.cursor_file.is_some();
+
                 let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
                 if let Some(handle) = self.abort_preview.replace(abort_handle) {
@@ -427,6 +434,17 @@ impl Component for FilePreviewModel {
                 match self.info.len() {
                     0 => (),
                     1 => self.update_single_file_preview(widgets, sender.clone()),
+                    n if self.cursor_leads => {
+                        // Preview the cursor file, annotated with the batch totals.
+                        let total: u64 = self.info.iter().map(|f| f.info.size() as u64).sum();
+                        self.update_single_file_preview(widgets, sender.clone());
+                        self.file_type_text = format!(
+                            "{} · {} selected — {}",
+                            self.file_type_text,
+                            n,
+                            glib::format_size(total),
+                        );
+                    }
                     _ => self.update_multiple_file_preview(),
                 }
             }
@@ -535,12 +553,9 @@ pub enum FilePreviewMsg {
 /// Query the relevant file info for the selection. The info will be returned in the same order as
 /// the files in the selection.
 async fn query_selection_info(selection: FileSelection) -> Result<Vec<FileInfo>, glib::Error> {
-    // While several rows are marked, the preview follows the keyboard cursor.
-    let files = selection
-        .cursor_file
-        .clone()
-        .map(|file| vec![file])
-        .unwrap_or(selection.files);
+    // The cursor file, when present, leads the list (build_selection puts it
+    // first); every file is still queried so batch totals can be shown.
+    let files = selection.files;
 
     // Fast path: if the only selected file is a directory, it will be hidden.
     if files.len() == 1 {

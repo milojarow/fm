@@ -34,3 +34,11 @@
   padding: 0.4em 1em;
   font-weight: bold;
 }
+
+.marked {
+  margin-left: 10px;
+}
+
+.marked .entry-label {
+  color: #e0af68;
+}

@@ -21,7 +21,7 @@ use super::app::AppMsg;
 use super::new_folder_dialog::{NewFolderDialog, NewFolderDialogMsg};
 use crate::config;
 use crate::ops;
-use crate::util::{self, fmt_files_as_uris, BitsetExt, GFileInfoExt};
+use crate::util::{self, fmt_files_as_uris, GFileInfoExt};
 
 mod actions;
 
@@ -68,9 +68,11 @@ pub struct Directory {
     #[educe(Debug(ignore))]
     cursor: std::rc::Rc<std::cell::Cell<Option<u32>>>,
 
-    /// Whether the cursor row is marked (Space): marked rows keep their
-    /// selection when the cursor moves off them.
-    cursor_marked: bool,
+    /// URIs marked with Space. Marks live outside the GTK selection (the
+    /// selection is the cursor bar alone), render in their own style, and
+    /// being URI-keyed they survive sorting and refreshes.
+    #[educe(Debug(ignore))]
+    marks: std::rc::Rc<RefCell<std::collections::HashSet<String>>>,
 }
 
 impl Directory {
@@ -81,7 +83,7 @@ impl Directory {
 
     /// Return the current selection.
     pub fn selection(&self) -> Selection {
-        build_selection(&self.list_model, self.cursor.get())
+        build_selection(&self.list_model, self.cursor.get(), &self.marks)
     }
 
     /// Returns the underlying directory list model.
@@ -125,22 +127,9 @@ impl Directory {
             return;
         }
 
-        // Only a real arrival re-derives the mark state: a clamped move that
-        // stays on the same row (j at the bottom edge, k at the top) must not
-        // mistake the cursor's own selection for a mark.
-        if self.cursor.get() != Some(pos) {
-            if let Some(old) = self.cursor.get() {
-                if !self.cursor_marked {
-                    self.list_model.unselect_item(old);
-                }
-            }
-
-            // Arriving on an already-selected row means it was marked earlier.
-            self.cursor_marked = self.list_model.is_selected(pos);
-        }
-
+        // The GTK selection is the cursor bar alone; marks render separately.
         self.cursor.set(Some(pos));
-        self.list_model.select_item(pos, false);
+        self.list_model.select_item(pos, true);
 
         let vadj = scroller.vadjustment();
         let row_height = vadj.upper() / f64::from(n);
@@ -153,19 +142,54 @@ impl Directory {
         }
     }
 
-    /// Returns the file info for the files that are currently selected.
+    /// Returns the file info for the operation set: every marked entry plus
+    /// the GTK-selected rows (the cursor bar, or a mouse multi-selection).
     ///
     /// This function does not perform any I/O.
     fn selected_file_info(&self) -> Vec<gio::FileInfo> {
-        let selected_set = self.list_model.selection();
-        selected_set
-            .iter()
-            .flat_map(|pos| {
-                self.list_model
-                    .item(pos)
-                    .map(|item| item.downcast::<gio::FileInfo>().unwrap())
-            })
-            .collect()
+        let marks = self.marks.borrow();
+        let mut out = Vec::new();
+
+        for pos in 0..self.list_model.n_items() {
+            if let Some(info) = self.list_model.item(pos).and_downcast::<gio::FileInfo>() {
+                if self.list_model.is_selected(pos)
+                    || marks.contains(info.file().unwrap().uri().as_str())
+                {
+                    out.push(info);
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Returns the file info under the keyboard cursor, if any.
+    fn cursor_file_info(&self) -> Option<gio::FileInfo> {
+        self.cursor
+            .get()
+            .and_then(|pos| self.list_model.item(pos))
+            .and_downcast::<gio::FileInfo>()
+    }
+
+    /// Re-applies the marked style to the visible row at `pos`.
+    fn restyle_row(&self, pos: u32) {
+        let marks = self.marks.borrow();
+        for (list_item, widget) in self.bound_rows.borrow().iter() {
+            let (Some(list_item), Some(widget)) = (list_item.upgrade(), widget.upgrade()) else {
+                continue;
+            };
+            if list_item.position() != pos {
+                continue;
+            }
+            if let Some(info) = list_item.item().and_downcast::<gio::FileInfo>() {
+                if marks.contains(info.file().unwrap().uri().as_str()) {
+                    widget.add_css_class("marked");
+                } else {
+                    widget.remove_css_class("marked");
+                }
+            }
+            break;
+        }
     }
 }
 
@@ -351,7 +375,7 @@ impl FactoryComponent for Directory {
             bound_rows: Default::default(),
             select_first_on_load,
             cursor: Default::default(),
-            cursor_marked: false,
+            marks: Default::default(),
         }
     }
 
@@ -380,6 +404,7 @@ impl FactoryComponent for Directory {
         let controllers = Arc::new(Mutex::new(HashMap::new()));
 
         let bound_rows = self.bound_rows.clone();
+        let marks = self.marks.clone();
         factory.connect_bind(clone!(
             #[strong]
             sender,
@@ -387,6 +412,8 @@ impl FactoryComponent for Directory {
             controllers,
             #[strong]
             bound_rows,
+            #[strong]
+            marks,
             move |_, list_item| {
                 let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
                 let widget = list_item.child().unwrap();
@@ -396,6 +423,13 @@ impl FactoryComponent for Directory {
                 bound_rows
                     .borrow_mut()
                     .push((list_item.downgrade(), widget.downgrade()));
+
+                // Recycled row widgets carry stale style state: re-derive it.
+                if marks.borrow().contains(info.file().unwrap().uri().as_str()) {
+                    widget.add_css_class("marked");
+                } else {
+                    widget.remove_css_class("marked");
+                }
 
                 if matches!(info.file_type(), gio::FileType::Directory) {
                     let dir = info.file().unwrap();
@@ -422,17 +456,19 @@ impl FactoryComponent for Directory {
 
         let sender_ = sender.clone();
         let cursor_ = self.cursor.clone();
+        let marks_ = self.marks.clone();
         self.list_model
             .connect_selection_changed(move |selection, _, _| {
-                send_new_selection(selection, &sender_, cursor_.get());
+                send_new_selection(selection, &sender_, cursor_.get(), &marks_);
             });
         let sender_ = sender.clone();
         let cursor_ = self.cursor.clone();
+        let marks_ = self.marks.clone();
         self.list_model
             .connect_items_changed(move |selection, _, _, _| {
                 sender_.input(DirectoryMessage::InvalidateCursor);
                 sender_.input(DirectoryMessage::AutoSelectIfPending);
-                send_new_selection(selection, &sender_, cursor_.get());
+                send_new_selection(selection, &sender_, cursor_.get(), &marks_);
             });
 
         let widgets = view_output!();
@@ -637,7 +673,7 @@ impl FactoryComponent for Directory {
                 refresh_highlights(&widgets.list_view);
             }
             DirectoryMessage::RenameSelected => {
-                if let Some(info) = self.selected_file_info().first() {
+                if let Some(info) = self.cursor_file_info().as_ref() {
                     let uri = info.file().unwrap().uri().to_string();
 
                     // Reach the selected entry's bound row widget: its per-row action
@@ -687,7 +723,7 @@ impl FactoryComponent for Directory {
                 self.list_model.unselect_all();
             }
             DirectoryMessage::OpenSelected => {
-                if let Some(info) = self.selected_file_info().first() {
+                if let Some(info) = self.cursor_file_info().as_ref() {
                     open_application_for_file(&info.file().unwrap(), &sender);
                 }
             }
@@ -698,11 +734,18 @@ impl FactoryComponent for Directory {
                 }
             }
             DirectoryMessage::ToggleMark => {
-                if let Some(pos) = self.cursor.get() {
-                    // Flip the mark; selection membership resolves when the
-                    // cursor leaves the row (marked rows stay selected).
-                    self.cursor_marked = !self.cursor_marked;
-                    self.list_model.select_item(pos, false);
+                if let (Some(pos), Some(info)) = (self.cursor.get(), self.cursor_file_info()) {
+                    let uri = info.file().unwrap().uri().to_string();
+                    {
+                        let mut marks = self.marks.borrow_mut();
+                        if !marks.remove(&uri) {
+                            marks.insert(uri);
+                        }
+                    }
+                    self.restyle_row(pos);
+
+                    // The operation set changed; let the app re-derive previews.
+                    send_new_selection(&self.list_model, &sender, self.cursor.get(), &self.marks);
 
                     // ranger advances after marking.
                     if pos + 1 < self.list_model.n_items() {
@@ -737,8 +780,8 @@ impl FactoryComponent for Directory {
                 }
             }
             DirectoryMessage::InvalidateCursor => {
+                // Positions shifted; marks are URI-keyed and survive on their own.
                 self.cursor.set(None);
-                self.cursor_marked = false;
             }
         }
 
@@ -1092,29 +1135,48 @@ fn directory_list_of(selection: &gtk::MultiSelection) -> gtk::DirectoryList {
         .unwrap()
 }
 
-/// Construct a new [`Selection`] from the given list model.
-fn build_selection(selection: &gtk::MultiSelection, cursor: Option<u32>) -> Selection {
-    let selected_set = selection.selection();
+/// Construct a new [`Selection`] from the given list model: the GTK-selected
+/// rows (cursor bar or mouse selection) plus every marked entry, with the
+/// cursor file leading the list.
+fn build_selection(
+    selection: &gtk::MultiSelection,
+    cursor: Option<u32>,
+    marks: &std::rc::Rc<RefCell<std::collections::HashSet<String>>>,
+) -> Selection {
+    let marks = marks.borrow();
 
-    if selected_set.is_empty() {
+    let cursor_file = cursor
+        .filter(|&pos| selection.is_selected(pos))
+        .and_then(|pos| selection.item(pos))
+        .map(|item| item.downcast::<gio::FileInfo>().unwrap().file().unwrap());
+
+    let mut files: Vec<gio::File> = Vec::new();
+    if let Some(cursor_file) = &cursor_file {
+        files.push(cursor_file.clone());
+    }
+
+    for pos in 0..selection.n_items() {
+        let Some(file) = selection
+            .item(pos)
+            .map(|item| item.downcast::<gio::FileInfo>().unwrap().file().unwrap())
+        else {
+            continue;
+        };
+
+        if files.iter().any(|f| f.equal(&file)) {
+            continue;
+        }
+
+        if selection.is_selected(pos) || marks.contains(file.uri().as_str()) {
+            files.push(file);
+        }
+    }
+
+    if files.is_empty() {
         Selection::None
     } else {
         let directory_list = directory_list_of(selection);
         let dir = directory_list.file().unwrap();
-
-        let files = selected_set
-            .iter()
-            .flat_map(|pos| {
-                selection
-                    .item(pos)
-                    .map(|item| item.downcast::<gio::FileInfo>().unwrap().file().unwrap())
-            })
-            .collect();
-
-        let cursor_file = cursor
-            .filter(|&pos| selection.is_selected(pos))
-            .and_then(|pos| selection.item(pos))
-            .map(|item| item.downcast::<gio::FileInfo>().unwrap().file().unwrap());
 
         Selection::Files(FileSelection {
             parent: dir,
@@ -1129,9 +1191,12 @@ fn send_new_selection(
     selection: &gtk::MultiSelection,
     sender: &FactorySender<Directory>,
     cursor: Option<u32>,
+    marks: &std::rc::Rc<RefCell<std::collections::HashSet<String>>>,
 ) {
     sender
-        .output(AppMsg::NewSelection(build_selection(selection, cursor)))
+        .output(AppMsg::NewSelection(build_selection(
+            selection, cursor, marks,
+        )))
         .unwrap();
 }
 

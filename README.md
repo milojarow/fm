@@ -29,7 +29,7 @@ ranger-inspired keys, added on top of upstream:
 | `n` / `N` | Jump to next / previous search match |
 | `Escape` (in search) | Cancel search and clear highlights |
 | `F2` | Rename the selected entry |
-| `Space` | Mark/unmark the cursor row and advance; marks survive navigation |
+| `Space` | Mark/unmark the cursor row and advance; marked rows indent and tint amber, and marks survive navigation and sorting |
 | `Delete` | Send the selected entries to the trash |
 | `Shift+Delete` | Permanently delete the selected entries (no trash, recursive on directories) |
 
