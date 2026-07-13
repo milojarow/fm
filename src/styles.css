@@ -26,3 +26,11 @@
 .file-preview-info .section-title {
   font-weight: bold;
 }
+
+.corner-toast {
+  background-color: rgba(20, 20, 24, 0.85);
+  color: white;
+  border-radius: 999px;
+  padding: 0.4em 1em;
+  font-weight: bold;
+}

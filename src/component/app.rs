@@ -45,6 +45,10 @@ pub struct AppModel {
     /// The index of the directory panel an active search applies to.
     search_panel: Option<usize>,
 
+    /// Monotonic id of the latest corner toast; expiry timers only hide the
+    /// toast if theirs is still the newest.
+    toast_epoch: std::rc::Rc<std::cell::Cell<u64>>,
+
     state: State,
 }
 
@@ -55,6 +59,26 @@ impl AppModel {
             .back()
             .expect("there must be at least one directory listed")
             .dir()
+    }
+
+    /// Shows `message` in the bottom-left corner toast for a few seconds.
+    fn show_toast(&self, widgets: &AppWidgets, message: &str) {
+        widgets.corner_toast_label.set_text(message);
+        widgets.corner_toast.set_reveal_child(true);
+
+        let epoch = self.toast_epoch.get() + 1;
+        self.toast_epoch.set(epoch);
+
+        let current_epoch = self.toast_epoch.clone();
+        let revealer = widgets.corner_toast.downgrade();
+        glib::timeout_add_seconds_local(4, move || {
+            if current_epoch.get() == epoch {
+                if let Some(revealer) = revealer.upgrade() {
+                    revealer.set_reveal_child(false);
+                }
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     /// Returns the index of the deepest panel holding the cursor (a selection).
@@ -152,8 +176,7 @@ impl Component for AppModel {
             set_default_size: (state.width, state.height),
             set_title: Some("fm"),
 
-            #[name = "toast_overlay"]
-            adw::ToastOverlay {
+            gtk::Overlay {
                 gtk::Box {
                     set_orientation: gtk::Orientation::Vertical,
 
@@ -228,6 +251,22 @@ impl Component for AppModel {
                                 },
                             },
                         },
+                    },
+                },
+
+                #[name = "corner_toast"]
+                add_overlay = &gtk::Revealer {
+                    set_halign: gtk::Align::Start,
+                    set_valign: gtk::Align::End,
+                    set_margin_start: 12,
+                    set_margin_bottom: 12,
+                    set_transition_type: gtk::RevealerTransitionType::Crossfade,
+                    set_can_target: false,
+
+                    #[wrap(Some)]
+                    #[name = "corner_toast_label"]
+                    set_child = &gtk::Label {
+                        add_css_class: "corner-toast",
                     },
                 },
             },
@@ -318,6 +357,7 @@ impl Component for AppModel {
             _places_sidebar: places_sidebar,
             update_directory_scroll_position: false,
             search_panel: None,
+            toast_epoch: Default::default(),
             state,
         };
 
@@ -581,7 +621,7 @@ impl Component for AppModel {
                 }
             }
             AppMsg::Toast(message) => {
-                widgets.toast_overlay.add_toast(adw::Toast::new(&message));
+                self.show_toast(widgets, &message);
             }
             AppMsg::About => {
                 gtk::AboutDialog::builder()
@@ -658,10 +698,7 @@ impl Component for AppModel {
                     (false, false) => "Sort: name (A\u{2192}Z)",
                     (false, true) => "Sort: name (Z\u{2192}A)",
                 };
-                let toast = adw::Toast::new(description);
-                // Replace any queued toast so rapid re-sorts give live feedback.
-                toast.set_priority(adw::ToastPriority::High);
-                widgets.toast_overlay.add_toast(toast);
+                self.show_toast(widgets, description);
             }
             AppMsg::RenameSelected => {
                 if let Some(idx) = self.cursor_panel() {
