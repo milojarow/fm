@@ -57,6 +57,11 @@ pub struct Directory {
     /// widget (and its per-row actions, e.g. rename) from a keyboard shortcut.
     #[educe(Debug(ignore))]
     bound_rows: std::rc::Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, glib::WeakRef<gtk::Widget>)>>>,
+
+    /// Root panels select their first row once loaded, so the cursor always
+    /// exists and `l`/`Enter` work without a `j` first. Panels spawned by
+    /// descending stay unselected — the cursor lives in their parent.
+    select_first_on_load: bool,
 }
 
 impl Directory {
@@ -206,13 +211,17 @@ pub enum DirectoryMessage {
 
     /// Open the currently selected entry with its default application.
     OpenSelected,
+
+    /// Select the first row once the listing has loaded, if this panel was
+    /// created wanting an initial cursor (root panels).
+    AutoSelectIfPending,
 }
 
 #[relm4::factory(pub)]
 impl FactoryComponent for Directory {
     type ParentWidget = panel::Paned;
     type Widgets = DirectoryWidgets;
-    type Init = gio::File;
+    type Init = (gio::File, bool);
     type Input = DirectoryMessage;
     type Output = AppMsg;
     type CommandOutput = ();
@@ -254,7 +263,11 @@ impl FactoryComponent for Directory {
         }
     }
 
-    fn init_model(dir: Self::Init, _index: &DynamicIndex, _sender: FactorySender<Self>) -> Self {
+    fn init_model(
+        (dir, select_first_on_load): Self::Init,
+        _index: &DynamicIndex,
+        _sender: FactorySender<Self>,
+    ) -> Self {
         debug_assert!(
             dir.query_file_type(gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE)
                 == gio::FileType::Directory
@@ -295,6 +308,7 @@ impl FactoryComponent for Directory {
             search_matches: Vec::new(),
             search_current: 0,
             bound_rows: Default::default(),
+            select_first_on_load,
         }
     }
 
@@ -372,6 +386,7 @@ impl FactoryComponent for Directory {
         self.list_model
             .connect_items_changed(move |selection, _, _, _| {
                 send_new_selection(selection, &sender_);
+                sender_.input(DirectoryMessage::AutoSelectIfPending);
             });
 
         let widgets = view_output!();
@@ -627,6 +642,12 @@ impl FactoryComponent for Directory {
             DirectoryMessage::OpenSelected => {
                 if let Some(info) = self.selected_file_info().first() {
                     open_application_for_file(&info.file().unwrap(), &sender);
+                }
+            }
+            DirectoryMessage::AutoSelectIfPending => {
+                if self.select_first_on_load && self.list_model.n_items() > 0 {
+                    self.select_first_on_load = false;
+                    self.select_and_scroll(&widgets.scroller, 0);
                 }
             }
         }

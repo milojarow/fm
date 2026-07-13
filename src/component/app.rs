@@ -367,7 +367,7 @@ impl Component for AppModel {
             state,
         };
 
-        model.directories.guard().push_back(dir);
+        model.directories.guard().push_back((dir, true));
 
         let mut group = RelmActionGroup::<WindowActionGroup>::new();
 
@@ -588,7 +588,7 @@ impl Component for AppModel {
                                 gio::Cancellable::NONE,
                             ) == gio::FileType::Directory
                             {
-                                directories.push_back(component_file.clone());
+                                directories.push_back((component_file.clone(), false));
                                 last_dir = component_file;
                             }
                         }
@@ -614,7 +614,7 @@ impl Component for AppModel {
                 directories.clear();
 
                 self.root = new_root;
-                directories.push_back(self.root.clone());
+                directories.push_back((self.root.clone(), true));
 
                 self.file_preview.emit(FilePreviewMsg::Hide);
 
