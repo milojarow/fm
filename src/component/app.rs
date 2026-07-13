@@ -155,6 +155,12 @@ pub enum AppMsg {
     /// Move the cursor down (`j`) or up (`k`) within the current panel.
     NavMove(i32),
 
+    /// Jump to the first row (`gg`).
+    NavFirst,
+
+    /// Jump to the last row (`G`).
+    NavLast,
+
     /// Descend into the selected directory, or open the selected file (`l`).
     NavInto,
 
@@ -407,6 +413,7 @@ impl Component for AppModel {
         // (sort by modified / name), F2 (rename).
         let key_controller = gtk::EventControllerKey::new();
         let pending_sort = std::rc::Rc::new(std::cell::Cell::new(false));
+        let pending_g = std::rc::Rc::new(std::cell::Cell::new(false));
         let window = widgets.main_window.downgrade();
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
             let Some(window) = window.upgrade() else {
@@ -421,6 +428,7 @@ impl Component for AppModel {
                     || focus.ancestor(gtk::Popover::static_type()).is_some()
             }) {
                 pending_sort.set(false);
+                pending_g.set(false);
                 return glib::Propagation::Proceed;
             }
 
@@ -439,6 +447,13 @@ impl Component for AppModel {
                 return glib::Propagation::Stop;
             }
 
+            if pending_g.take() {
+                if keyval == gdk::Key::g {
+                    key_sender.input(AppMsg::NavFirst);
+                }
+                return glib::Propagation::Stop;
+            }
+
             match keyval {
                 gdk::Key::BackSpace => {
                     let _ = window.activate_action("win.toggle-hidden", None);
@@ -450,6 +465,14 @@ impl Component for AppModel {
                 }
                 gdk::Key::o => {
                     pending_sort.set(true);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::g => {
+                    pending_g.set(true);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::G => {
+                    key_sender.input(AppMsg::NavLast);
                     glib::Propagation::Stop
                 }
                 gdk::Key::n => {
@@ -719,6 +742,18 @@ impl Component for AppModel {
                         self.directories.send(idx, msg);
                     }
                 }
+            }
+            AppMsg::NavFirst => {
+                let idx = self
+                    .cursor_panel()
+                    .unwrap_or(self.directories.len().saturating_sub(1));
+                self.directories.send(idx, DirectoryMessage::SelectFirst);
+            }
+            AppMsg::NavLast => {
+                let idx = self
+                    .cursor_panel()
+                    .unwrap_or(self.directories.len().saturating_sub(1));
+                self.directories.send(idx, DirectoryMessage::SelectLast);
             }
             AppMsg::NavInto => {
                 if let Some(idx) = self.cursor_panel() {

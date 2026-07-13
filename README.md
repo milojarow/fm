@@ -17,6 +17,7 @@ ranger-inspired keys, added on top of upstream:
 | Key | Action |
 |---|---|
 | `j` / `k` | Move the cursor down / up in the current column |
+| `gg` / `G` | Jump to the first / last row |
 | `l` | Enter the selected directory, or open the selected file |
 | `h` | Go to the parent column; at the root column, go up one level |
 | `Backspace` / `Ctrl+H` | Toggle hidden files (persisted) |
