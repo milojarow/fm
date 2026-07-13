@@ -62,6 +62,15 @@ pub struct Directory {
     /// exists and `l`/`Enter` work without a `j` first. Panels spawned by
     /// descending stay unselected — the cursor lives in their parent.
     select_first_on_load: bool,
+
+    /// Position of the keyboard cursor row. Shared with the selection-changed
+    /// closure so the preview can follow the cursor; cleared when items shift.
+    #[educe(Debug(ignore))]
+    cursor: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+
+    /// Whether the cursor row is marked (Space): marked rows keep their
+    /// selection when the cursor moves off them.
+    cursor_marked: bool,
 }
 
 impl Directory {
@@ -72,7 +81,7 @@ impl Directory {
 
     /// Return the current selection.
     pub fn selection(&self) -> Selection {
-        build_selection(&self.list_model)
+        build_selection(&self.list_model, self.cursor.get())
     }
 
     /// Returns the underlying directory list model.
@@ -102,19 +111,30 @@ impl Directory {
         }
     }
 
-    /// Selects the entry at `pos` and scrolls it into view.
+    /// Moves the keyboard cursor to `pos` and scrolls it into view. The row
+    /// the cursor leaves keeps its selection only if it was marked (Space);
+    /// other selected rows are never touched, so marks survive navigation.
     ///
-    /// The list view sits inside a Box (which hosts the context menu popover)
-    /// inside the scrolled window, so its own Scrollable interface dangles and
-    /// `list.scroll-to-item` is a no-op; the outer scrolled window owns the
-    /// scroll position. Rows are uniform, so the row extent is plain arithmetic.
-    fn select_and_scroll(&self, scroller: &gtk::ScrolledWindow, pos: u32) {
-        self.list_model.select_item(pos, true);
-
+    /// Scrolling drives the outer scrolled window directly: the list view sits
+    /// inside a Box (which hosts the context menu popover), so its own
+    /// Scrollable interface dangles and `list.scroll-to-item` is a no-op.
+    /// Rows are uniform, so the row extent is plain arithmetic.
+    fn select_and_scroll(&mut self, scroller: &gtk::ScrolledWindow, pos: u32) {
         let n = self.list_model.n_items();
-        if n == 0 {
+        if n == 0 || pos >= n {
             return;
         }
+
+        if let Some(old) = self.cursor.get() {
+            if old != pos && !self.cursor_marked {
+                self.list_model.unselect_item(old);
+            }
+        }
+
+        // Arriving on an already-selected row means it was marked earlier.
+        self.cursor_marked = self.list_model.is_selected(pos);
+        self.cursor.set(Some(pos));
+        self.list_model.select_item(pos, false);
 
         let vadj = scroller.vadjustment();
         let row_height = vadj.upper() / f64::from(n);
@@ -165,6 +185,11 @@ pub struct FileSelection {
     /// The selected files.
     #[educe(Debug(method = "util::fmt_files_as_uris"))]
     pub files: Vec<gio::File>,
+
+    /// The file under the keyboard cursor, when one exists — previews and
+    /// descend logic follow it while several rows are marked.
+    #[educe(Debug(ignore))]
+    pub cursor_file: Option<gio::File>,
 }
 
 #[derive(Debug)]
@@ -215,6 +240,16 @@ pub enum DirectoryMessage {
     /// Select the first row once the listing has loaded, if this panel was
     /// created wanting an initial cursor (root panels).
     AutoSelectIfPending,
+
+    /// Toggle the mark on the cursor row and advance the cursor (Space).
+    ToggleMark,
+
+    /// Permanently delete the selected entries (Shift+Delete). No trash.
+    DeleteSelectionPermanent,
+
+    /// Items shifted (load, sort, external changes): stored cursor position is
+    /// no longer trustworthy.
+    InvalidateCursor,
 }
 
 #[relm4::factory(pub)]
@@ -309,6 +344,8 @@ impl FactoryComponent for Directory {
             search_current: 0,
             bound_rows: Default::default(),
             select_first_on_load,
+            cursor: Default::default(),
+            cursor_marked: false,
         }
     }
 
@@ -378,15 +415,18 @@ impl FactoryComponent for Directory {
         });
 
         let sender_ = sender.clone();
+        let cursor_ = self.cursor.clone();
         self.list_model
             .connect_selection_changed(move |selection, _, _| {
-                send_new_selection(selection, &sender_);
+                send_new_selection(selection, &sender_, cursor_.get());
             });
         let sender_ = sender.clone();
+        let cursor_ = self.cursor.clone();
         self.list_model
             .connect_items_changed(move |selection, _, _, _| {
-                send_new_selection(selection, &sender_);
+                sender_.input(DirectoryMessage::InvalidateCursor);
                 sender_.input(DirectoryMessage::AutoSelectIfPending);
+                send_new_selection(selection, &sender_, cursor_.get());
             });
 
         let widgets = view_output!();
@@ -610,16 +650,17 @@ impl FactoryComponent for Directory {
             DirectoryMessage::MoveCursor(delta) => {
                 let n = self.list_model.n_items();
                 if n > 0 {
-                    let selected = self.list_model.selection();
-                    let pos = if selected.is_empty() {
-                        if delta >= 0 {
-                            0
-                        } else {
-                            n - 1
-                        }
-                    } else {
-                        let current = i64::from(selected.minimum());
-                        (current + i64::from(delta)).clamp(0, i64::from(n - 1)) as u32
+                    let current = self.cursor.get().filter(|&c| c < n).or_else(|| {
+                        let selected = self.list_model.selection();
+                        (!selected.is_empty()).then(|| selected.minimum())
+                    });
+
+                    let pos = match current {
+                        Some(current) => (i64::from(current) + i64::from(delta))
+                            .clamp(0, i64::from(n - 1))
+                            as u32,
+                        None if delta >= 0 => 0,
+                        None => n - 1,
                     };
 
                     self.select_and_scroll(&widgets.scroller, pos);
@@ -649,6 +690,49 @@ impl FactoryComponent for Directory {
                     self.select_first_on_load = false;
                     self.select_and_scroll(&widgets.scroller, 0);
                 }
+            }
+            DirectoryMessage::ToggleMark => {
+                if let Some(pos) = self.cursor.get() {
+                    // Flip the mark; selection membership resolves when the
+                    // cursor leaves the row (marked rows stay selected).
+                    self.cursor_marked = !self.cursor_marked;
+                    self.list_model.select_item(pos, false);
+
+                    // ranger advances after marking.
+                    if pos + 1 < self.list_model.n_items() {
+                        self.select_and_scroll(&widgets.scroller, pos + 1);
+                    }
+                }
+            }
+            DirectoryMessage::DeleteSelectionPermanent => {
+                let selected = self.selected_file_info();
+                if selected.is_empty() {
+                    return;
+                }
+
+                info!(
+                    "permanently deleting files: {:?}",
+                    fmt_file_info(&selected)
+                );
+
+                for file_info in &selected {
+                    let file = file_info.file().unwrap();
+                    let Some(path) = file.path() else { continue };
+
+                    let result = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+
+                    if let Err(e) = result {
+                        sender.output(AppMsg::Error(Box::new(e))).unwrap();
+                    }
+                }
+            }
+            DirectoryMessage::InvalidateCursor => {
+                self.cursor.set(None);
+                self.cursor_marked = false;
             }
         }
 
@@ -1003,7 +1087,7 @@ fn directory_list_of(selection: &gtk::MultiSelection) -> gtk::DirectoryList {
 }
 
 /// Construct a new [`Selection`] from the given list model.
-fn build_selection(selection: &gtk::MultiSelection) -> Selection {
+fn build_selection(selection: &gtk::MultiSelection, cursor: Option<u32>) -> Selection {
     let selected_set = selection.selection();
 
     if selected_set.is_empty() {
@@ -1021,14 +1105,27 @@ fn build_selection(selection: &gtk::MultiSelection) -> Selection {
             })
             .collect();
 
-        Selection::Files(FileSelection { parent: dir, files })
+        let cursor_file = cursor
+            .filter(|&pos| selection.is_selected(pos))
+            .and_then(|pos| selection.item(pos))
+            .map(|item| item.downcast::<gio::FileInfo>().unwrap().file().unwrap());
+
+        Selection::Files(FileSelection {
+            parent: dir,
+            files,
+            cursor_file,
+        })
     }
 }
 
 /// Notifies the main component of the path of a new selection.
-fn send_new_selection(selection: &gtk::MultiSelection, sender: &FactorySender<Directory>) {
+fn send_new_selection(
+    selection: &gtk::MultiSelection,
+    sender: &FactorySender<Directory>,
+    cursor: Option<u32>,
+) {
     sender
-        .output(AppMsg::NewSelection(build_selection(selection)))
+        .output(AppMsg::NewSelection(build_selection(selection, cursor)))
         .unwrap();
 }
 

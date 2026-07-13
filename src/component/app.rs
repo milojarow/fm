@@ -166,6 +166,15 @@ pub enum AppMsg {
 
     /// Move the cursor to the parent panel; at the root column, go up one level (`h`).
     NavParent,
+
+    /// Toggle the mark on the cursor row and advance (`Space`).
+    ToggleMark,
+
+    /// Send the selected entries to the trash (`Delete`).
+    TrashSelected,
+
+    /// Permanently delete the selected entries (`Shift+Delete`).
+    DeletePermanentSelected,
 }
 
 #[relm4::component(pub)]
@@ -504,6 +513,18 @@ impl Component for AppModel {
                     key_sender.input(AppMsg::RenameSelected);
                     glib::Propagation::Stop
                 }
+                gdk::Key::space => {
+                    key_sender.input(AppMsg::ToggleMark);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Delete => {
+                    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+                        key_sender.input(AppMsg::DeletePermanentSelected);
+                    } else {
+                        key_sender.input(AppMsg::TrashSelected);
+                    }
+                    glib::Propagation::Stop
+                }
                 _ => glib::Propagation::Proceed,
             }
         });
@@ -545,11 +566,13 @@ impl Component for AppModel {
             AppMsg::NewSelection(Selection::Files(selection)) => {
                 let mut last_dir = self.last_dir();
 
-                let file = if selection.files.len() == 1 {
-                    selection.files.first().unwrap()
-                } else {
-                    &selection.parent
-                };
+                // With several rows marked, panel pushes and the preview follow
+                // the keyboard cursor rather than the whole batch.
+                let file = selection
+                    .cursor_file
+                    .as_ref()
+                    .or_else(|| (selection.files.len() == 1).then(|| selection.files.first().unwrap()))
+                    .unwrap_or(&selection.parent);
 
                 let file_path = match glib::Uri::split(&file.uri(), glib::UriFlags::NONE) {
                     Ok((_, _, _, _, path, _, _)) => PathBuf::from(&path),
@@ -763,6 +786,22 @@ impl Component for AppModel {
                     .cursor_panel()
                     .unwrap_or(self.directories.len().saturating_sub(1));
                 self.directories.send(idx, DirectoryMessage::SelectLast);
+            }
+            AppMsg::ToggleMark => {
+                if let Some(idx) = self.cursor_panel() {
+                    self.directories.send(idx, DirectoryMessage::ToggleMark);
+                }
+            }
+            AppMsg::TrashSelected => {
+                if let Some(idx) = self.cursor_panel() {
+                    self.directories.send(idx, DirectoryMessage::TrashSelection);
+                }
+            }
+            AppMsg::DeletePermanentSelected => {
+                if let Some(idx) = self.cursor_panel() {
+                    self.directories
+                        .send(idx, DirectoryMessage::DeleteSelectionPermanent);
+                }
             }
             AppMsg::NavInto => {
                 if let Some(idx) = self.cursor_panel() {

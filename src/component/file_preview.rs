@@ -535,9 +535,16 @@ pub enum FilePreviewMsg {
 /// Query the relevant file info for the selection. The info will be returned in the same order as
 /// the files in the selection.
 async fn query_selection_info(selection: FileSelection) -> Result<Vec<FileInfo>, glib::Error> {
+    // While several rows are marked, the preview follows the keyboard cursor.
+    let files = selection
+        .cursor_file
+        .clone()
+        .map(|file| vec![file])
+        .unwrap_or(selection.files);
+
     // Fast path: if the only selected file is a directory, it will be hidden.
-    if selection.files.len() == 1 {
-        let info = selection.files[0]
+    if files.len() == 1 {
+        let info = files[0]
             .query_info_future(
                 gio::FILE_ATTRIBUTE_STANDARD_TYPE,
                 gio::FileQueryInfoFlags::NONE,
@@ -564,8 +571,8 @@ async fn query_selection_info(selection: FileSelection) -> Result<Vec<FileInfo>,
     ]
     .join(",");
 
-    let is_single_file = selection.files.len() == 1;
-    let selection_info = future::join_all(selection.files.into_iter().map(|file| async {
+    let is_single_file = files.len() == 1;
+    let selection_info = future::join_all(files.into_iter().map(|file| async {
         let info = file
             .query_info_future(
                 &attributes,
