@@ -667,7 +667,13 @@ impl Component for AppModel {
             }
             AppMsg::Mount => self.mount.emit(MountMsg::Mount),
             AppMsg::SearchOpen => {
-                self.search_panel = Some(self.directories.len().saturating_sub(1));
+                // Search the panel the cursor lives in — the deepest listing may
+                // be an unselected child spawned by the cursor sitting on a
+                // directory (root panels auto-select their first row).
+                self.search_panel = Some(
+                    self.cursor_panel()
+                        .unwrap_or(self.directories.len().saturating_sub(1)),
+                );
                 widgets.search_bar.set_search_mode(true);
                 widgets.search_entry.grab_focus();
                 // A previous term stays in the entry; select it so typing replaces it.
