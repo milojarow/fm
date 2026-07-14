@@ -695,9 +695,11 @@ fn format_item_types(files: &[FileInfo]) -> String {
     }
 }
 
-/// Formats a [`GDateTime`](glib::DateTime) as a human-readable date string.
+/// Formats a [`GDateTime`](glib::DateTime) as a human-readable date string in
+/// the local timezone (GIO hands file times over in UTC).
 fn format_datetime(dt: &glib::DateTime) -> String {
-    dt.format(LONG_DATE_FORMAT).unwrap().into()
+    let local = dt.to_local().unwrap_or_else(|_| dt.clone());
+    local.format(LONG_DATE_FORMAT).unwrap().into()
 }
 
 /// Formats an iterator of [`GDateTime](glib::DateTime) objects as a range between the earliest and
@@ -708,6 +710,9 @@ fn format_datetime_range(dts: impl Iterator<Item = glib::DateTime>) -> String {
         MinMaxResult::OneElement(e) => (e.clone(), e),
         MinMaxResult::MinMax(min, max) => (min, max),
     };
+
+    let min = min.to_local().unwrap_or(min);
+    let max = max.to_local().unwrap_or(max);
 
     if min.ymd() == max.ymd() {
         min.format(SHORT_DATE_FORMAT).unwrap().to_string()
