@@ -6,7 +6,7 @@ use std::io;
 use futures::stream::{AbortHandle, Abortable, Aborted};
 use futures::{future, prelude::*};
 use glib::GString;
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, glib, pango};
 use itertools::{Itertools, MinMaxResult};
 use mime::Mime;
 use relm4::gtk::prelude::*;
@@ -198,6 +198,10 @@ impl Component for FilePreviewModel {
 
     view! {
         adw::Clamp {
+            // Cap the preview's width demand so deep panel stacks don't force
+            // horizontal scrolling just to see it; content adapts inside.
+            set_maximum_size: 480,
+
             gtk::Box {
                 add_css_class: "file-preview-widget",
                 set_orientation: gtk::Orientation::Vertical,
@@ -233,6 +237,7 @@ impl Component for FilePreviewModel {
                         set_hexpand: true,
                         set_valign: gtk::Align::Center,
                         set_vexpand: true,
+                        set_can_shrink: true,
                     },
 
                     #[name = "text_container"]
@@ -250,6 +255,8 @@ impl Component for FilePreviewModel {
                             set_editable: false,
                             set_monospace: true,
                             set_valign: gtk::Align::Center,
+                            // Long lines wrap instead of demanding width.
+                            set_wrap_mode: gtk::WrapMode::WordChar,
                         }
                     },
 
@@ -309,6 +316,7 @@ impl Component for FilePreviewModel {
                         add_css_class: "file-name",
                         set_hexpand: true,
                         set_halign: gtk::Align::Start,
+                        set_ellipsize: pango::EllipsizeMode::Middle,
                     },
                     attach[0, 1, 2, 1]: file_type = &gtk::Label {
                         #[watch]
@@ -317,6 +325,7 @@ impl Component for FilePreviewModel {
                         #[iterate]
                         add_css_class: ["file-type", "dim-label"],
                         set_halign: gtk::Align::Start,
+                        set_ellipsize: pango::EllipsizeMode::End,
                     },
                     attach[0, 2, 2, 1] = &gtk::Label {
                         set_label: "Information",
