@@ -1201,8 +1201,14 @@ git push origin HEAD:master
 
 - [ ] **Step 4: Install the release build**
 
+Install from the **fork**, never from the local path. `cargo install --path`
+rewrites the registered source to a local directory, and `cargo install-update`
+(topgrade's cargo step) updates from whatever source is registered — a path
+install quietly ends the update-proofing the fork exists to provide. Push first,
+then:
+
 ```bash
-cargo install --path ~/.local/src/fm --force
+cargo install --git https://github.com/milojarow/fm fm --force
 ```
 
 Then tell the operator to launch `fm` themselves — never open a GUI window into
