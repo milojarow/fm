@@ -3,7 +3,7 @@
 use std::convert::identity;
 use std::path::{self, PathBuf};
 
-use gtk::{gdk, gio, glib, prelude::*};
+use gtk::{gdk, gio, glib, pango, prelude::*};
 use relm4::actions::{RelmAction, RelmActionGroup};
 use relm4::factory::FactoryVecDeque;
 use relm4::prelude::*;
@@ -109,6 +109,41 @@ impl AppModel {
                 }
             }
         }
+    }
+
+    /// Retitles the header with the path the cursor is in, abbreviating
+    /// ancestor names from the left until the label's width accepts it.
+    fn retitle(&self, widgets: &AppWidgets) {
+        let cursor = self
+            .cursor_panel()
+            .unwrap_or_else(|| self.directories.len().saturating_sub(1));
+
+        let Some(path) = self
+            .directories
+            .get(cursor)
+            .and_then(|panel| panel.dir().path())
+        else {
+            return;
+        };
+
+        let segments = crate::path_title::segments(&path, Some(&glib::home_dir()));
+
+        let label = &widgets.path_title;
+        let available = label.width();
+        let layout = label.create_pango_layout(None);
+        let fits = |candidate: &str| {
+            // Before the first allocation there is nothing to measure against;
+            // show the full path and let the next relayout shorten it.
+            if available <= 0 {
+                return true;
+            }
+            layout.set_text(candidate);
+            layout.pixel_size().0 <= available
+        };
+
+        label.set_markup(&crate::path_title::markup(&crate::path_title::shorten(
+            &segments, fits,
+        )));
     }
 }
 
@@ -220,6 +255,17 @@ impl Component for AppModel {
                     set_orientation: gtk::Orientation::Vertical,
 
                     adw::HeaderBar {
+                        #[wrap(Some)]
+                        #[name = "path_title"]
+                        set_title_widget = &gtk::Label {
+                            add_css_class: "title",
+                            set_hexpand: true,
+                            set_single_line_mode: true,
+                            // Last resort when even the fully abbreviated path
+                            // overflows a very narrow window.
+                            set_ellipsize: pango::EllipsizeMode::Middle,
+                        },
+
                         pack_end = &gtk::MenuButton {
                             set_icon_name: "open-menu-symbolic",
                             set_menu_model: Some(&primary_menu),
@@ -853,6 +899,7 @@ impl Component for AppModel {
         }
 
         self.relayout(widgets);
+        self.retitle(widgets);
     }
 
     fn post_view(&self, widgets: &mut Self::Widgets) {
