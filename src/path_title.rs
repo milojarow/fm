@@ -74,6 +74,35 @@ pub fn markup(path: &str) -> String {
     }
 }
 
+/// Pango markup for a location with no local path: a `gvfs` URI such as
+/// `trash:///` or `smb://host/share/docs`. The last component is emphasised
+/// like a directory name and the rest is dimmed, so the header still describes
+/// the directory being listed instead of keeping the previous path on screen.
+///
+/// No abbreviation ladder here: URIs have no `$HOME` to fold away, and the
+/// label's own middle ellipsis handles a long one.
+pub fn uri_markup(uri: &str) -> String {
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return format!("<b>{}</b>", escape(uri));
+    };
+
+    // `trash:///` and friends have nothing after the scheme to emphasise.
+    match rest.trim_end_matches('/').rsplit_once('/') {
+        Some((ancestors, current)) => format!(
+            "<span alpha=\"55%\">{}://{}/</span><b>{}</b>",
+            escape(scheme),
+            escape(ancestors),
+            escape(current)
+        ),
+        None if rest.trim_end_matches('/').is_empty() => format!("<b>{}</b>", escape(uri)),
+        None => format!(
+            "<span alpha=\"55%\">{}://</span><b>{}</b>",
+            escape(scheme),
+            escape(rest.trim_end_matches('/'))
+        ),
+    }
+}
+
 /// Joins segments back into a path without doubling the leading separator.
 fn join(segments: &[String]) -> String {
     match segments.split_first() {
@@ -176,5 +205,40 @@ mod tests {
             markup("~/a&b/<c>"),
             "<span alpha=\"55%\">~/a&amp;b/</span><b>&lt;c&gt;</b>"
         );
+    }
+
+    #[test]
+    fn a_rootless_uri_is_emphasised_whole() {
+        assert_eq!(uri_markup("trash:///"), "<b>trash:///</b>");
+        assert_eq!(uri_markup("recent:///"), "<b>recent:///</b>");
+    }
+
+    #[test]
+    fn a_uri_dims_everything_but_its_last_component() {
+        assert_eq!(
+            uri_markup("smb://host/share/docs"),
+            "<span alpha=\"55%\">smb://host/share/</span><b>docs</b>"
+        );
+        assert_eq!(
+            uri_markup("mtp://device"),
+            "<span alpha=\"55%\">mtp://</span><b>device</b>"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_hide_the_directory_name() {
+        assert_eq!(
+            uri_markup("sftp://host/srv/www/"),
+            "<span alpha=\"55%\">sftp://host/srv/</span><b>www</b>"
+        );
+    }
+
+    #[test]
+    fn a_uri_escapes_pango_markup_syntax_too() {
+        assert_eq!(
+            uri_markup("smb://a&b/<c>"),
+            "<span alpha=\"55%\">smb://a&amp;b/</span><b>&lt;c&gt;</b>"
+        );
+        assert_eq!(uri_markup("weird&scheme"), "<b>weird&amp;scheme</b>");
     }
 }

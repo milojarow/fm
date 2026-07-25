@@ -103,10 +103,26 @@ without a special case.
 
 ### Degenerate windows
 
-If `A < SLIVER_MIN` (a window narrower than roughly `C + 24`), skip the whole
-computation: restore the uniform `WIDTH` request on every panel, clear the
-margin, and let the scroller behave as it does today. An escape hatch, not a
-supported layout.
+The layout is declined whenever the preview would end up under its floor:
+
+```
+A − Σ (widths of the right-hand panels) < PREVIEW_MIN
+```
+
+The right-hand panels are already capped at `A − PREVIEW_MIN`, so that cap
+absorbs any tail of them and the condition reduces to `A < PREVIEW_MIN` — a
+columns area under **660px** (`C` is pinned at `CURRENT_MIN` below `W = 866`, so
+`A = (W − 260) / 2 < 200 ⟺ W < 660`), which is roughly a 810px window with the
+Places sidebar showing and a 660px one once the flap has folded it away. The
+`A < SLIVER_MIN` check that guards the taper sits well inside that band and
+never decides anything on its own.
+
+In the declined band: restore the uniform `WIDTH` request on every panel, clear
+the margin, and let the scroller behave as it did before this feature — the
+panels do overflow there, so the view follows them, keeping the newest column
+in sight (`hadjustment.value = upper`, applied on relayout and on the
+adjustment's `upper` changing). An escape hatch, not a supported layout: it only
+has to stay usable.
 
 ### Worked example
 
@@ -150,6 +166,11 @@ Replace `set_title: Some("fm")` with a `set_title_widget` holding a `gtk::Label`
 using Pango markup: ancestor segments in a dimmed colour, the current directory
 in bold. The path is the **cursor panel's** directory, not the deepest panel's.
 
+A location with no local path — `trash:///` from the Places sidebar, an `smb://`
+share, a phone over MTP — is titled from its URI with the same dimming, last
+component emphasised. Keeping the previous directory's path on screen there
+would state the user is somewhere they are not.
+
 Shortening, applied in order until the rendered width fits the label's allocation:
 
 1. Replace a `$HOME` prefix with `~`.
@@ -178,9 +199,13 @@ app.rs
   relayout(widgets)      reads scroller.width(), computes the table above,
                          sends one message per panel, sets the paned margin,
                          sets hexpand on the preview root
-  title markup           built from the cursor panel's path, same trigger points
-  removed                set_adjustment_to_upper_bound() and its hadjustment
-                         notify hook — nothing overflows any more
+  title markup           built from the cursor panel's path, same trigger
+                         points; a location with no local path (trash:///,
+                         smb://…) is titled from its URI instead
+  scroll follow          kept only for the declined band, where uniform columns
+                         still overflow: the `upper` notify hook scrolls to the
+                         end while that fallback is in force, and is silent
+                         under a computed layout
 
 directory_list.rs
   DirectoryMessage::SetLayout { width, sliver }

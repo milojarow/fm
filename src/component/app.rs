@@ -45,6 +45,12 @@ pub struct AppModel {
     /// toast if theirs is still the newest.
     toast_epoch: std::rc::Rc<std::cell::Cell<u64>>,
 
+    /// True while the columns area is too narrow for a computed layout and the
+    /// panels fall back to uniform widths. Those overflow the scroller, so the
+    /// view has to follow the newest column the way it did before the tapering
+    /// layout existed. Shared with the scroller's `upper` hook.
+    columns_overflow: std::rc::Rc<std::cell::Cell<bool>>,
+
     state: State,
 }
 
@@ -96,6 +102,7 @@ impl AppModel {
 
         match crate::layout::solve(area, self.directories.len(), cursor) {
             Some(plan) => {
+                self.columns_overflow.set(false);
                 widgets.directory_panes.set_margin_start(plan.gutter);
                 for (index, panel) in plan.panels.iter().enumerate() {
                     self.directories
@@ -103,10 +110,20 @@ impl AppModel {
                 }
             }
             None => {
+                // Uniform columns overflow a narrow area, so the pre-layout
+                // behaviour comes back with them: keep the rightmost panels in
+                // view. The panels resize on a later main loop turn, so this
+                // only covers the case where the adjustment never changes (a
+                // new selection inside an existing panel); the `upper` hook in
+                // `init` catches the rest.
+                self.columns_overflow.set(true);
                 widgets.directory_panes.set_margin_start(0);
                 for index in 0..self.directories.len() {
                     self.directories.send(index, DirectoryMessage::ResetLayout);
                 }
+
+                let adjustment = widgets.directory_panes_scroller.hadjustment();
+                adjustment.set_value(adjustment.upper());
             }
         }
     }
@@ -118,17 +135,23 @@ impl AppModel {
             .cursor_panel()
             .unwrap_or_else(|| self.directories.len().saturating_sub(1));
 
-        let Some(path) = self
-            .directories
-            .get(cursor)
-            .and_then(|panel| panel.dir().path())
-        else {
+        let Some(dir) = self.directories.get(cursor).map(|panel| panel.dir()) else {
+            return;
+        };
+
+        let label = &widgets.path_title;
+
+        let Some(path) = dir.path() else {
+            // A gvfs location — `trash:///`, `smb://…`, a phone over MTP — has
+            // no local path. Leaving the previous directory's path on screen
+            // would claim the user is somewhere they are not, so name the
+            // location itself.
+            label.set_markup(&crate::path_title::uri_markup(&dir.uri()));
             return;
         };
 
         let segments = crate::path_title::segments(&path, Some(&glib::home_dir()));
 
-        let label = &widgets.path_title;
         let available = label.width();
         let layout = label.create_pango_layout(None);
         let fits = |candidate: &str| {
@@ -446,6 +469,7 @@ impl Component for AppModel {
             _places_sidebar: places_sidebar,
             search_panel: None,
             toast_epoch: Default::default(),
+            columns_overflow: Default::default(),
             state,
         };
 
@@ -618,6 +642,22 @@ impl Component for AppModel {
             .connect_notify_local(Some("page-size"), {
                 let sender = relayout_sender;
                 move |_, _| sender.input(AppMsg::Relayout)
+            });
+
+        // A computed layout never overflows, but the uniform fallback for a
+        // too-narrow area does, and a panel pushed onto the stack widens the
+        // paned one main loop turn after the relayout ran. Follow the newest
+        // column then, and only then.
+        widgets
+            .directory_panes_scroller
+            .hadjustment()
+            .connect_notify_local(Some("upper"), {
+                let overflow = model.columns_overflow.clone();
+                move |adjustment: &gtk::Adjustment, _| {
+                    if overflow.get() {
+                        adjustment.set_value(adjustment.upper());
+                    }
+                }
             });
 
         ComponentParts { model, widgets }
