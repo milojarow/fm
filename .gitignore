@@ -1,2 +1,6 @@
 /target
 result
+
+# Operator-only, never shared
+CLAUDE.md
+.claude/memory/
