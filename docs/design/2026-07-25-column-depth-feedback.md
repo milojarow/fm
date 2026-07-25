@@ -132,15 +132,24 @@ without a special case.
 The layout is declined whenever the preview would end up under its floor:
 
 ```
-A − Σ (widths of the right-hand panels) < PREVIEW_MIN
+right space − Σ (widths of the right-hand panels) < PREVIEW_MIN
 ```
 
-The right-hand panels are already capped at `A − PREVIEW_MIN`, so that cap
-absorbs any tail of them and the condition reduces to `A < PREVIEW_MIN` — a
-columns area under **660px** (`C` is pinned at `CURRENT_MIN` below `W = 866`, so
-`A = (W − 260) / 2 < 200 ⟺ W < 660`), which is roughly a 810px window with the
-Places sidebar showing and a 660px one once the flap has folded it away. The
-`A < SLIVER_MIN` check that guards the taper sits well inside that band and
+The right-hand panels are already capped at `right space − PREVIEW_MIN`, so that
+cap absorbs any tail of them and the condition reduces to
+`right space < PREVIEW_MIN`. Because `right space` depends on whether a gutter is
+being reserved, the declined band has two halves:
+
+- **With ancestors** (`right space = A`): a columns area under **660px**. `C` is
+  pinned at `CURRENT_MIN` below `W = 866`, so `A = (W − 260) / 2 < 200 ⟺
+  W < 660` — roughly an 810px window with the Places sidebar showing, 660px once
+  the flap has folded it away.
+- **At the root** (`right space = W − C`): a columns area under **460px**, since
+  `W − 260 < 200 ⟺ W < 460`. Dropping the gutter bought back the whole
+  460–660px band at startup, which used to fall back to uniform columns for no
+  good reason.
+
+The `A < SLIVER_MIN` check that guards the taper sits well inside both bands and
 never decides anything on its own.
 
 In the declined band: restore the uniform `WIDTH` request on every panel, clear
