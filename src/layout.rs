@@ -104,6 +104,16 @@ pub fn solve(area_width: i32, panel_count: usize, cursor: usize) -> Option<Layou
         right.pop();
     }
 
+    // The preview has no computed width: it absorbs what the right-hand panels
+    // leave of the budget. Below its floor it stops shrinking, so the paned
+    // outgrows the scroller and the preview is clipped at the window edge —
+    // decline instead, and let the caller fall back to uniform columns. This is
+    // the tighter of the two escape hatches: `SLIVER_MIN` above only catches
+    // areas so narrow that not even a gutter fits.
+    if budget - right.iter().sum::<i32>() < PREVIEW_MIN {
+        return None;
+    }
+
     for (offset, width) in right.iter().enumerate() {
         panels[cursor + 1 + offset] = sized(*width);
     }
@@ -235,12 +245,17 @@ mod tests {
         );
     }
 
+    /// 900px rather than the 400px this test first used: 400 cannot hold the
+    /// cursor's 260px column and the preview's 200px floor at once, so it is now
+    /// the uniform-columns escape hatch's problem, not a layout to assert on.
+    /// A 900px area still leaves 39 ancestors far too little room, which is what
+    /// this test is about.
     #[test]
     fn very_deep_stacks_drop_their_oldest_columns() {
-        let plan = solve(400, 40, 39).expect("laid out");
+        let plan = solve(900, 40, 39).expect("laid out");
         assert!(
             plan.panels.iter().any(|panel| !panel.visible),
-            "some ancestors must drop out of a 400px area"
+            "some ancestors must drop out of a 900px area"
         );
         let left: i32 = plan
             .panels
@@ -249,12 +264,49 @@ mod tests {
             .map(|panel| panel.width)
             .sum::<i32>()
             - plan.panels[39].width;
-        assert!(left <= (400 - plan.panels[39].width) / 2);
+        assert!(left <= (900 - plan.panels[39].width) / 2);
     }
 
     #[test]
     fn a_window_too_narrow_to_lay_out_returns_none() {
         assert_eq!(solve(270, 3, 1), None);
+    }
+
+    /// The columns area of a 700px window. The cursor's column takes its 260px
+    /// minimum, leaving 144px a side: enough for the gutter, not enough for the
+    /// preview, which would be clipped against the window edge.
+    #[test]
+    fn an_area_too_narrow_for_the_preview_floor_returns_none() {
+        assert_eq!(solve(548, 1, 0), None);
+    }
+
+    /// The promise of the whole design: whatever `solve` returns fits inside the
+    /// area it was given, preview included. Anything wider overflows the paned
+    /// past the scroller and clips the preview at the window edge.
+    #[test]
+    fn a_layout_that_fits_or_no_layout_at_all() {
+        for area in (0..2400).step_by(4) {
+            for panel_count in 1..8usize {
+                for cursor in 0..panel_count {
+                    let Some(plan) = solve(area, panel_count, cursor) else {
+                        continue;
+                    };
+
+                    let columns: i32 = plan
+                        .panels
+                        .iter()
+                        .filter(|panel| panel.visible)
+                        .map(|panel| panel.width)
+                        .sum();
+                    assert!(
+                        plan.gutter + columns + PREVIEW_MIN <= area,
+                        "area {area}, {panel_count} panels, cursor {cursor}: gutter {} \
+                         + columns {columns} + preview {PREVIEW_MIN} overflows",
+                        plan.gutter,
+                    );
+                }
+            }
+        }
     }
 
     #[test]
