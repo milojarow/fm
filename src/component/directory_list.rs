@@ -73,6 +73,10 @@ pub struct Directory {
     /// being URI-keyed they survive sorting and refreshes.
     #[educe(Debug(ignore))]
     marks: std::rc::Rc<RefCell<std::collections::HashSet<String>>>,
+
+    /// True while this panel is too narrow to show its listing. Shared with the
+    /// loading handler so a refresh cannot bounce a sliver back to the listing.
+    sliver: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl Directory {
@@ -302,11 +306,23 @@ impl FactoryComponent for Directory {
         root = gtk::Stack {
             set_width_request: WIDTH,
 
+            // Only the visible page's width is requested, so a sliver can go
+            // below the 58px a listing needs.
+            set_hhomogeneous: false,
+
             add_child = &gtk::Spinner {
                 set_halign: gtk::Align::Center,
                 set_valign: gtk::Align::Center,
                 set_spinning: true,
             } -> { set_name: "spinner" },
+
+            #[name = "sliver_label"]
+            add_child = &gtk::Label {
+                add_css_class: "column-sliver",
+                set_vexpand: true,
+                set_yalign: 0.0,
+                set_margin_top: 8,
+            } -> { set_name: "sliver" },
 
             #[name = "scroller"]
             add_child = &gtk::ScrolledWindow {
@@ -383,6 +399,7 @@ impl FactoryComponent for Directory {
             select_first_on_load,
             cursor: Default::default(),
             marks: Default::default(),
+            sliver: Default::default(),
         }
     }
 
@@ -501,11 +518,28 @@ impl FactoryComponent for Directory {
         register_directory_context_actions(widgets.list_view.upcast_ref(), sender.clone());
         widgets.list_view.add_controller(click_controller);
 
-        self.directory_list()
-            .bind_property("loading", &widgets.root, "visible-child-name")
-            .transform_to(|_, loading| Some(if loading { "spinner" } else { "listing" }))
-            .sync_create()
-            .build();
+        let name = self
+            .dir()
+            .basename()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        widgets
+            .sliver_label
+            .set_text(&crate::path_title::initial(&name));
+
+        let directory_list = self.directory_list();
+        directory_list.connect_loading_notify(clone!(
+            #[weak(rename_to = stack)]
+            widgets.root,
+            #[strong(rename_to = sliver)]
+            self.sliver,
+            move |list| apply_page(&stack, list.is_loading(), sliver.get())
+        ));
+        apply_page(
+            &widgets.root,
+            directory_list.is_loading(),
+            self.sliver.get(),
+        );
 
         let drop_target = new_drop_target_for_dir(self.dir(), sender);
         widgets.list_view.add_controller(drop_target);
@@ -794,11 +828,19 @@ impl FactoryComponent for Directory {
                 widgets.root.set_visible(plan.visible);
                 if plan.visible {
                     widgets.root.set_width_request(plan.width);
+                    self.sliver.set(plan.sliver);
+                    apply_page(
+                        &widgets.root,
+                        self.directory_list().is_loading(),
+                        plan.sliver,
+                    );
                 }
             }
             DirectoryMessage::ResetLayout => {
                 widgets.root.set_visible(true);
                 widgets.root.set_width_request(WIDTH);
+                self.sliver.set(false);
+                apply_page(&widgets.root, self.directory_list().is_loading(), false);
             }
         }
 
@@ -1134,6 +1176,18 @@ fn new_drop_target_for_dir(dir: gio::File, sender: FactorySender<Directory>) -> 
     ));
 
     drop_target
+}
+
+/// Chooses a panel's stack page: the spinner while the listing loads, then
+/// either the listing or the thin sliver strip.
+fn apply_page(stack: &gtk::Stack, loading: bool, sliver: bool) {
+    stack.set_visible_child_name(if loading {
+        "spinner"
+    } else if sliver {
+        "sliver"
+    } else {
+        "listing"
+    });
 }
 
 /// Walks the list model chain (multi selection → sorter → hidden-files filter)
