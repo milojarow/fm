@@ -918,6 +918,10 @@ fn build_list_item_view(
 
             #[name = "file_name"]
             gtk::Label {
+                // `.marked .entry-label` in styles.css colours marked entries;
+                // without this class that rule matched nothing and a marked row
+                // only ever got its indent.
+                add_css_class: "entry-label",
                 set_ellipsize: pango::EllipsizeMode::Middle,
             },
 
