@@ -56,17 +56,26 @@ The `k` ancestors share `A` with geometric weights, hugging `ACTUAL`:
 
 ```
 weight(d) = TAPER_RATIO ^ d          d = distance to ACTUAL, nearest ancestor d = 0
-width(d)  = A · weight(d) / Σ weights
+width(d)  = floor(A · weight(d) / Σ weights)
 ```
+
+Widths are floored, never rounded: rounding five ancestors up can overshoot `A`
+by a pixel and evict a column for no reason.
 
 Then clamp each width up to `SLIVER_MIN`. If the clamped widths exceed `A`, drop
 the oldest ancestor — `set_visible(false)` on its root, so it stops requesting
 width without being removed from the factory — and recompute, until they fit.
 Dropped panels become visible again as soon as the budget allows.
 
-When `k = 0` there is nothing to fill `A`, so it stays empty: set `margin_start =
-A` on the `panel::Paned`. `ACTUAL` therefore sits in the same place from startup
-onwards. Reset the margin to 0 as soon as `k > 0`.
+The gutter is whatever the ancestors did not consume:
+
+```
+gutter = A − Σ (widths of visible ancestors)
+```
+
+which is `A` when there are none, so the `k = 0` case needs no special rule. The
+gutter is a `margin_start` on the `panel::Paned` and also absorbs the pixels lost
+to flooring, keeping the left side exactly `A` and `ACTUAL` exactly centred.
 
 ### Right side
 
@@ -79,6 +88,10 @@ panel without popping deeper ones, so more than one may be present.
 - Deeper right-hand panels continue the same `TAPER_RATIO` progression.
 - The preview gets **no computed width**. It carries `hexpand` and absorbs
   whatever is left, which is `A −` (right-hand panels) by construction.
+- The right-hand panels may claim at most `A − PREVIEW_MIN`. Repeated `h`
+  presses can leave a long tail of panels to the right of the cursor, and
+  without this cap they would starve the preview into a sliver of its own. When
+  the tapered widths exceed the cap, hide the deepest panel and recompute.
 
 Letting the preview absorb the remainder makes the arithmetic rounding-proof:
 if the computed widths are off by a few pixels, the preview swallows the error
@@ -98,12 +111,15 @@ supported layout.
 ### Worked example
 
 Window 1600px, sidebar 152px, so `W = 1448`, `C = 434`, `A = 507`, five
-ancestors:
+ancestors and one child panel:
 
-| | abu+4 | abu+3 | abu+2 | abuelo | padre | **ACTUAL** | hija | preview |
-|---|---|---|---|---|---|---|---|---|
-| px | 44 | 63 | 90 | 128 | 183 | **434** | 183 | 324 |
-| page | sliver | sliver | listing | listing | listing | listing | listing | — |
+| | gutter | abu+4 | abu+3 | abu+2 | abuelo | padre | **ACTUAL** | hija | preview |
+|---|---|---|---|---|---|---|---|---|---|
+| px | 4 | 43 | 62 | 89 | 127 | 182 | **434** | 182 | 325 |
+| page | — | sliver | sliver | listing | listing | listing | listing | listing | — |
+
+Left side: `4 + 43 + 62 + 89 + 127 + 182 = 507 = A`. Right side:
+`182 + 325 = 507 = A`. `ACTUAL` is centred.
 
 ## Column states
 
@@ -122,6 +138,12 @@ used in the title bar so both read as the same breadcrumb.
 `set_hhomogeneous(false)` on that Stack is load-bearing: without it the Stack
 keeps requesting the listing's 58px on the sliver page and no column can taper.
 
+The page is currently chosen by a property binding from the directory list's
+`loading` flag (`directory_list.rs:497`), which only knows two pages. That
+binding is replaced by a `loading` notify handler that consults both the loading
+flag and the panel's sliver state, so a reload cannot silently drop a sliver back
+to the listing page.
+
 ## Title bar
 
 Replace `set_title: Some("fm")` with a `set_title_widget` holding a `gtk::Label`
@@ -133,11 +155,14 @@ Shortening, applied in order until the rendered width fits the label's allocatio
 1. Replace a `$HOME` prefix with `~`.
 2. Abbreviate the leftmost still-full segment to its initial, preserving a
    leading dot. Repeat.
-3. If everything is abbreviated and it still does not fit, ellipsise the middle.
 
-The last segment is never abbreviated. Fit is tested by measuring candidate
-strings with a `pango::Layout` built from the label's own context, so the check
-matches what will actually be drawn.
+The last segment is never abbreviated, and neither is the leading `~` or `/`.
+Fit is tested by measuring candidate strings with a `pango::Layout` built from
+the label's own context, so the check matches what will actually be drawn.
+
+If everything is abbreviated and it still does not fit — a window narrow enough
+that even `~/p/s/d/fm/src` overflows — the label's own
+`EllipsizeMode::Middle` handles the remainder. No hand-rolled ellipsis.
 
 ```
 ~/projects/software/dev/fm/src
@@ -194,6 +219,7 @@ changes, never on `j`/`k` inside a panel, so there is nothing to smooth over.
 | `SLIVER_THRESHOLD` | 72 |
 | `SLIVER_MIN` | 12 |
 | `NO_PARENT_CHILD_FRACTION` | 0.45 |
+| `PREVIEW_MIN` | 200 |
 
 ## Out of scope
 
