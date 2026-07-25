@@ -16,7 +16,16 @@
 - Never `pkill -f` anything; kill by PID.
 - `set_title` on the window stays `"fm"`. The operator's waybar `window-rewrite` rules match on window titles; only the header's title *widget* changes.
 - Preserve existing behaviour: marks, search, sort, rename, trash, vim navigation. Any regression there fails the task.
-- Build check for every task: `cargo build 2>&1 | grep -E "^(error|warning: unused)"` must show nothing new beyond the two pre-existing upstream warnings (`selection` method never used, `util.rs` lifetimes).
+- `cargo build` takes about 100 seconds here. Every cargo command needs a
+  600000 ms timeout or it fails for no reason.
+- Build check for every task: `cargo build` must produce no errors and no
+  warnings beyond this measured baseline of four, all from upstream:
+
+```
+2 × warning: hiding a lifetime that's elided elsewhere is confusing
+1 × warning: struct `BitsetIter` is never constructed
+1 × warning: trait `BitsetExt` is never used
+```
 
 ---
 
