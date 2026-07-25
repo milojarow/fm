@@ -9,6 +9,7 @@
 
 mod component;
 mod config;
+pub mod layout;
 mod ops;
 mod util;
 
