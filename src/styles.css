@@ -35,6 +35,18 @@
   font-weight: bold;
 }
 
+/* The cursor bar. It rides a class on the row's own box rather than the GTK
+   selection: rules on `listview > row` never reach those nodes from this
+   provider. Cyan is the desktop accent, so the cursor reads as "here" the same
+   way it does everywhere else on this machine. */
+.cursor-row {
+  background-color: alpha(#00ecec, 0.14);
+  box-shadow:
+    inset 0 0 0 1px alpha(#00ecec, 0.9),
+    inset 0 0 12px 0 alpha(#00ecec, 0.3),
+    0 0 10px 0 alpha(#00ecec, 0.4);
+}
+
 .marked {
   margin-left: 10px;
 }

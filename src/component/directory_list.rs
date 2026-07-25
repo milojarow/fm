@@ -74,6 +74,10 @@ pub struct Directory {
     #[educe(Debug(ignore))]
     marks: std::rc::Rc<RefCell<std::collections::HashSet<String>>>,
 
+    /// True while this panel owns the keyboard cursor. Only that panel's
+    /// row wears the glow; ancestors keep their selection rendered quietly.
+    is_cursor_panel: std::rc::Rc<std::cell::Cell<bool>>,
+
     /// True while this panel is too narrow to show its listing. Shared with the
     /// loading handler so a refresh cannot bounce a sliver back to the listing.
     sliver: std::rc::Rc<std::cell::Cell<bool>>,
@@ -134,6 +138,7 @@ impl Directory {
         // The GTK selection is the cursor bar alone; marks render separately.
         self.cursor.set(Some(pos));
         self.list_model.select_item(pos, true);
+        self.restyle_cursor();
 
         let vadj = scroller.vadjustment();
         let row_height = vadj.upper() / f64::from(n);
@@ -173,6 +178,29 @@ impl Directory {
             .get()
             .and_then(|pos| self.list_model.item(pos))
             .and_downcast::<gio::FileInfo>()
+    }
+
+    /// Re-applies the cursor style across the visible rows.
+    ///
+    /// The glow cannot ride the GTK selection: a provider rule on
+    /// `listview > row` never reaches those nodes, measured with a magenta
+    /// test rule that painted nothing while a class rule on our own widget
+    /// painted fine. So the cursor bar wears a CSS class on the row's own box,
+    /// exactly the way marks already do.
+    fn restyle_cursor(&self) {
+        // Ancestor panels keep their selection as a quiet breadcrumb; lighting
+        // all of them up would defeat the point of finding the cursor.
+        let cursor = self.is_cursor_panel.get().then(|| self.cursor.get()).flatten();
+        for (list_item, widget) in self.bound_rows.borrow().iter() {
+            let (Some(list_item), Some(widget)) = (list_item.upgrade(), widget.upgrade()) else {
+                continue;
+            };
+            if cursor == Some(list_item.position()) {
+                widget.add_css_class("cursor-row");
+            } else {
+                widget.remove_css_class("cursor-row");
+            }
+        }
     }
 
     /// Re-applies the marked style to the visible row at `pos`.
@@ -284,6 +312,9 @@ pub enum DirectoryMessage {
     /// Items shifted (load, sort, external changes): stored cursor position is
     /// no longer trustworthy.
     InvalidateCursor,
+
+    /// Whether this panel currently owns the keyboard cursor.
+    SetCursorPanel(bool),
 
     /// Take the width and page the app's column layout computed for this panel.
     SetLayout(crate::layout::PanelLayout),
@@ -399,6 +430,7 @@ impl FactoryComponent for Directory {
             select_first_on_load,
             cursor: Default::default(),
             marks: Default::default(),
+            is_cursor_panel: Default::default(),
             sliver: Default::default(),
         }
     }
@@ -429,6 +461,8 @@ impl FactoryComponent for Directory {
 
         let bound_rows = self.bound_rows.clone();
         let marks = self.marks.clone();
+        let cursor = self.cursor.clone();
+        let is_cursor_panel = self.is_cursor_panel.clone();
         factory.connect_bind(clone!(
             #[strong]
             sender,
@@ -438,6 +472,10 @@ impl FactoryComponent for Directory {
             bound_rows,
             #[strong]
             marks,
+            #[strong]
+            cursor,
+            #[strong]
+            is_cursor_panel,
             move |_, list_item| {
                 let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
                 let widget = list_item.child().unwrap();
@@ -453,6 +491,12 @@ impl FactoryComponent for Directory {
                     widget.add_css_class("marked");
                 } else {
                     widget.remove_css_class("marked");
+                }
+
+                if is_cursor_panel.get() && cursor.get() == Some(list_item.position()) {
+                    widget.add_css_class("cursor-row");
+                } else {
+                    widget.remove_css_class("cursor-row");
                 }
 
                 if matches!(info.file_type(), gio::FileType::Directory) {
@@ -823,6 +867,11 @@ impl FactoryComponent for Directory {
             DirectoryMessage::InvalidateCursor => {
                 // Positions shifted; marks are URI-keyed and survive on their own.
                 self.cursor.set(None);
+                self.restyle_cursor();
+            }
+            DirectoryMessage::SetCursorPanel(owns_cursor) => {
+                self.is_cursor_panel.set(owns_cursor);
+                self.restyle_cursor();
             }
             DirectoryMessage::SetLayout(plan) => {
                 widgets.root.set_visible(plan.visible);

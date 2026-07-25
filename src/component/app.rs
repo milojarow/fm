@@ -94,6 +94,20 @@ impl AppModel {
 
     /// Applies the tapering column layout: ancestors thin out to the left, the
     /// cursor's column stays centred, and the preview absorbs the remainder.
+    /// Tells each panel whether it owns the keyboard cursor. Only that panel
+    /// glows its cursor row; the ancestors keep their selection as a quiet
+    /// breadcrumb, so exactly one row on screen says "you are here".
+    fn mark_cursor_panel(&self) {
+        let cursor = self
+            .cursor_panel()
+            .unwrap_or_else(|| self.directories.len().saturating_sub(1));
+
+        for index in 0..self.directories.len() {
+            self.directories
+                .send(index, DirectoryMessage::SetCursorPanel(index == cursor));
+        }
+    }
+
     fn relayout(&self, widgets: &AppWidgets) {
         let area = widgets.directory_panes_scroller.width();
         let cursor = self
@@ -938,6 +952,7 @@ impl Component for AppModel {
             }
         }
 
+        self.mark_cursor_panel();
         self.relayout(widgets);
         self.retitle(widgets);
     }

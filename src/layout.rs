@@ -92,25 +92,43 @@ pub fn solve(area_width: i32, panel_count: usize, cursor: usize) -> Option<Layou
         panels[dropped + offset] = sized(*width);
     }
 
+    // With ancestors on screen the gutter is the slack they left, which keeps
+    // the cursor column centred. With none — at the root, or when a cramped
+    // budget evicted them all — reserving that space would only park the
+    // listing behind a third of a window of nothing, so the columns go left
+    // instead and the room goes to the right of the cursor.
+    let ancestors_total: i32 = ancestors.iter().sum();
+    let gutter = if ancestors.is_empty() {
+        0
+    } else {
+        budget - ancestors_total
+    };
+
+    // What is actually left once the left side has taken its share. It equals
+    // the side budget whenever the gutter is centring the layout, and doubles
+    // when there is no gutter — which is why the child panel survives at the
+    // root in windows where a symmetric budget would have evicted it.
+    let right_space = area_width - gutter - ancestors_total - current;
+
     // Right: the first panel mirrors the nearest ancestor and deeper ones keep
     // tapering, but they may never eat into the preview's floor.
     let mirror = ancestors
         .last()
         .copied()
         .unwrap_or((budget as f64 * NO_PARENT_CHILD_FRACTION) as i32);
-    let right_budget = (budget - PREVIEW_MIN).max(0);
+    let right_budget = (right_space - PREVIEW_MIN).max(0);
     let mut right = right_widths(mirror, panel_count - cursor - 1);
     while !right.is_empty() && right.iter().sum::<i32>() > right_budget {
         right.pop();
     }
 
     // The preview has no computed width: it absorbs what the right-hand panels
-    // leave of the budget. Below its floor it stops shrinking, so the paned
-    // outgrows the scroller and the preview is clipped at the window edge —
-    // decline instead, and let the caller fall back to uniform columns. This is
-    // the tighter of the two escape hatches: `SLIVER_MIN` above only catches
-    // areas so narrow that not even a gutter fits.
-    if budget - right.iter().sum::<i32>() < PREVIEW_MIN {
+    // leave. Below its floor it stops shrinking, so the paned outgrows the
+    // scroller and the preview is clipped at the window edge — decline instead,
+    // and let the caller fall back to uniform columns. This is the tighter of
+    // the two escape hatches: `SLIVER_MIN` above only catches areas so narrow
+    // that not even a gutter fits.
+    if right_space - right.iter().sum::<i32>() < PREVIEW_MIN {
         return None;
     }
 
@@ -122,7 +140,7 @@ pub fn solve(area_width: i32, panel_count: usize, cursor: usize) -> Option<Layou
     }
 
     Some(Layout {
-        gutter: budget - ancestors.iter().sum::<i32>(),
+        gutter,
         panels,
     })
 }
@@ -185,7 +203,9 @@ mod tests {
 
     #[test]
     fn centres_the_cursor_column() {
-        for cursor in 0..6 {
+        // From depth 1 on: the ancestors plus the gutter fill the side budget,
+        // which is what puts the cursor column in the middle.
+        for cursor in 1..6 {
             let plan = solve(AREA, 7, cursor).expect("laid out");
             let left: i32 = plan.panels[..cursor]
                 .iter()
@@ -202,9 +222,20 @@ mod tests {
     }
 
     #[test]
-    fn the_root_column_gets_the_whole_gutter() {
+    fn the_root_column_hugs_the_left_edge() {
+        // Centring the root column would mean reserving a whole side budget of
+        // nothing to its left, which just looks broken on startup.
         let plan = solve(AREA, 3, 0).expect("laid out");
-        assert_eq!(plan.gutter, (AREA - plan.panels[0].width) / 2);
+        assert_eq!(plan.gutter, 0);
+    }
+
+    #[test]
+    fn evicting_every_ancestor_also_drops_the_gutter() {
+        // A budget too cramped to hold even one ancestor leaves nothing to
+        // centre against, so the same left-edge rule applies.
+        let plan = solve(900, 30, 29).expect("laid out");
+        assert!(plan.panels[..29].iter().any(|panel| panel.visible)
+            || plan.gutter == 0);
     }
 
     #[test]
@@ -277,7 +308,21 @@ mod tests {
     /// preview, which would be clipped against the window edge.
     #[test]
     fn an_area_too_narrow_for_the_preview_floor_returns_none() {
-        assert_eq!(solve(548, 1, 0), None);
+        // With ancestors the layout is symmetric, so each side gets
+        // (548 - 260) / 2 = 144 — under the preview's floor, and the preview
+        // would be clipped at the window edge. Decline and let the caller fall
+        // back to uniform columns.
+        assert_eq!(solve(548, 3, 1), None);
+    }
+
+    #[test]
+    fn the_same_area_fits_at_the_root_because_there_is_no_gutter() {
+        // No ancestors means no reserved left side, so the whole 288px past the
+        // cursor column is the preview's: it fits, and declining here would
+        // hand the user a scrollbar for nothing.
+        let plan = solve(548, 1, 0).expect("laid out");
+        assert_eq!(plan.gutter, 0);
+        assert_eq!(548 - plan.panels[0].width, 288);
     }
 
     /// The promise of the whole design: whatever `solve` returns fits inside the

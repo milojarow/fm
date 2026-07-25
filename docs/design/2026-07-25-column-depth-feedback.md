@@ -70,12 +70,38 @@ Dropped panels become visible again as soon as the budget allows.
 The gutter is whatever the ancestors did not consume:
 
 ```
-gutter = A − Σ (widths of visible ancestors)
+gutter = A − Σ (widths of visible ancestors)      when any ancestor is visible
+gutter = 0                                        otherwise
 ```
 
-which is `A` when there are none, so the `k = 0` case needs no special rule. The
-gutter is a `margin_start` on the `panel::Paned` and also absorbs the pixels lost
-to flooring, keeping the left side exactly `A` and `ACTUAL` exactly centred.
+The gutter is a `margin_start` on the `panel::Paned`. With ancestors on screen it
+absorbs the pixels lost to flooring, keeping the left side exactly `A` and
+`ACTUAL` exactly centred.
+
+**Revised 2026-07-25, after using it.** The original rule reserved `A` even with
+no ancestors, so `ACTUAL` was centred from startup and never moved again. In
+practice that opens `fm` with roughly a third of the window blank to the left of
+the listing, which reads as broken. With no ancestors there is nothing to centre
+against, so the columns go to the left edge instead and the space goes to the
+right of the cursor. The cost, accepted knowingly: `ACTUAL` shifts once, on the
+first descent, and is stable from then on.
+
+This also applies when a cramped budget evicted every ancestor — same condition,
+same reason.
+
+### Space to the right
+
+`A` describes the left side. What the right side actually has is whatever the
+left did not take:
+
+```
+right space = W − gutter − Σ (visible ancestor widths) − C
+```
+
+That equals `A` whenever the gutter is centring the layout, and doubles to
+`W − C` when there is no gutter. The right-hand panels and the preview floor are
+measured against *this*, not against `A` — otherwise the root view would evict
+its child panel in windows where it comfortably fits.
 
 ### Right side
 
@@ -249,8 +275,16 @@ changes, never on `j`/`k` inside a panel, so there is nothing to smooth over.
 ## Out of scope
 
 - Animating width changes.
-- Any extra highlight on the current column (accent border, dimming the others).
-  The taper and the fixed position already carry the signal.
+- Any extra highlight on the current *column* (accent border, dimming the
+  others). The taper and the fixed position already carry the signal.
+
+The cursor *row* did get one, added 2026-07-25 on request: a cyan glow keyed to
+the desktop accent `#00ecec`. It cannot ride the GTK selection — a provider rule
+on `listview > row` never reaches those nodes, measured with a magenta test rule
+that painted nothing while a class rule on our own widget painted fine — so it
+wears a `.cursor-row` class on the row's box, the same mechanism marks already
+use. Only the panel that owns the cursor lights up; ancestors keep their
+selection as a quiet breadcrumb, or every column would glow at once.
 - Persisting anything new in `state.json`. The layout is derived, not stored.
 
 ## Verification
