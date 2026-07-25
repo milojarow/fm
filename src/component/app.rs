@@ -38,10 +38,6 @@ pub struct AppModel {
     mount: Controller<Mount>,
     _places_sidebar: Controller<PlacesSidebarModel>,
 
-    /// Whether the directory panes scroll window should update its scroll position to the upper
-    /// bound on the next view update.
-    update_directory_scroll_position: bool,
-
     /// The index of the directory panel an active search applies to.
     search_panel: Option<usize>,
 
@@ -89,6 +85,31 @@ impl AppModel {
                 .is_some_and(|dir| matches!(dir.selection(), Selection::Files(_)))
         })
     }
+
+    /// Applies the tapering column layout: ancestors thin out to the left, the
+    /// cursor's column stays centred, and the preview absorbs the remainder.
+    fn relayout(&self, widgets: &AppWidgets) {
+        let area = widgets.directory_panes_scroller.width();
+        let cursor = self
+            .cursor_panel()
+            .unwrap_or_else(|| self.directories.len().saturating_sub(1));
+
+        match crate::layout::solve(area, self.directories.len(), cursor) {
+            Some(plan) => {
+                widgets.directory_panes.set_margin_start(plan.gutter);
+                for (index, panel) in plan.panels.iter().enumerate() {
+                    self.directories
+                        .send(index, DirectoryMessage::SetLayout(*panel));
+                }
+            }
+            None => {
+                widgets.directory_panes.set_margin_start(0);
+                for index in 0..self.directories.len() {
+                    self.directories.send(index, DirectoryMessage::ResetLayout);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -121,6 +142,9 @@ pub enum AppMsg {
 
     /// Display a toast.
     Toast(String),
+
+    /// The columns area changed size; recompute the column widths.
+    Relayout,
 
     /// Display the about window.
     About,
@@ -346,6 +370,10 @@ impl Component for AppModel {
 
         let file_preview = FilePreviewModel::builder().launch(()).detach();
 
+        // Every column has a computed width; the preview takes whatever is
+        // left, so rounding can never produce a scrollbar.
+        file_preview.widget().set_hexpand(true);
+
         let places_sidebar = PlacesSidebarModel::builder()
             .launch(dir.clone())
             .forward(sender.input_sender(), identity);
@@ -370,7 +398,6 @@ impl Component for AppModel {
                 .detach(),
             file_preview,
             _places_sidebar: places_sidebar,
-            update_directory_scroll_position: false,
             search_panel: None,
             toast_epoch: Default::default(),
             state,
@@ -404,6 +431,7 @@ impl Component for AppModel {
         group.add_action(toggle_hidden_action);
 
         let key_sender = sender.clone();
+        let relayout_sender = sender.clone();
 
         let mount_action: RelmAction<MountAction> = RelmAction::new_stateless(move |_| {
             sender.input(AppMsg::Mount);
@@ -536,13 +564,14 @@ impl Component for AppModel {
 
         widgets.search_bar.connect_entry(&widgets.search_entry);
 
-        // TODO: There's sometimes a delay in updating the adjustment upper bound when a new pane
-        // is added, causing this code to not trigger at the right time. Needs more investigation.
+        // page-size is the viewport width: it changes on window resize and when
+        // the places sidebar is folded away.
         widgets
             .directory_panes_scroller
             .hadjustment()
-            .connect_notify(Some("upper"), |this, _| {
-                set_adjustment_to_upper_bound(this);
+            .connect_notify_local(Some("page-size"), {
+                let sender = relayout_sender;
+                move |_, _| sender.input(AppMsg::Relayout)
             });
 
         ComponentParts { model, widgets }
@@ -555,8 +584,6 @@ impl Component for AppModel {
         sender: ComponentSender<Self>,
         _: &Self::Root,
     ) {
-        self.update_directory_scroll_position = false;
-
         match msg {
             AppMsg::Error(err) => {
                 self.error_alert.emit(AlertMsg::Show {
@@ -621,13 +648,9 @@ impl Component for AppModel {
 
                 self.file_preview
                     .emit(FilePreviewMsg::NewSelection(selection));
-
-                self.update_directory_scroll_position = true;
             }
             AppMsg::NewSelection(Selection::None) => {
                 self.file_preview.emit(FilePreviewMsg::Hide);
-
-                self.update_directory_scroll_position = true;
             }
             AppMsg::NewRoot(new_root) => {
                 info!("new root: {:?}", new_root);
@@ -640,8 +663,6 @@ impl Component for AppModel {
                 directories.push_back((self.root.clone(), true));
 
                 self.file_preview.emit(FilePreviewMsg::Hide);
-
-                self.update_directory_scroll_position = true;
             }
             AppMsg::Transfer(transfer) => {
                 match transfer {
@@ -670,6 +691,8 @@ impl Component for AppModel {
             AppMsg::Toast(message) => {
                 self.show_toast(widgets, &message);
             }
+            // Handled by the relayout at the end of this function.
+            AppMsg::Relayout => {}
             AppMsg::About => {
                 gtk::AboutDialog::builder()
                     .authors(
@@ -828,22 +851,13 @@ impl Component for AppModel {
                 }
             }
         }
+
+        self.relayout(widgets);
     }
 
     fn post_view(&self, widgets: &mut Self::Widgets) {
         if self.state.is_maximized {
             widgets.main_window.maximize();
-        }
-
-        if self.update_directory_scroll_position {
-            // Although this function is already called whenever the hadjustment changes, we also
-            // sometimes want to scroll when the adjustment doesn't change.
-            //
-            // Consider the user selecting a new directory entry on a partially obscured panel. The
-            // adjustment won't change, because the total number of panels is the same. However,
-            // we still want to scroll over to it because it's new information that the user wants
-            // to see.
-            set_adjustment_to_upper_bound(&widgets.directory_panes_scroller.hadjustment());
         }
     }
 }
@@ -852,11 +866,3 @@ relm4::new_action_group!(WindowActionGroup, "win");
 relm4::new_stateless_action!(AboutAction, WindowActionGroup, "about");
 relm4::new_stateless_action!(MountAction, WindowActionGroup, "mount");
 relm4::new_stateful_action!(ToggleHiddenAction, WindowActionGroup, "toggle-hidden", (), bool);
-
-/// Updates the value of an adjustment to its upper bound.
-///
-/// This is used to keep new directories and file information visible inside the directory panes
-/// scroll window as user interacts with the application.
-fn set_adjustment_to_upper_bound(adjustment: &gtk::Adjustment) {
-    adjustment.set_value(adjustment.upper());
-}

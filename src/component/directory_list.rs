@@ -280,6 +280,13 @@ pub enum DirectoryMessage {
     /// Items shifted (load, sort, external changes): stored cursor position is
     /// no longer trustworthy.
     InvalidateCursor,
+
+    /// Take the width and page the app's column layout computed for this panel.
+    SetLayout(crate::layout::PanelLayout),
+
+    /// Fall back to the uniform column width; the window is too narrow to lay
+    /// out and the view scrolls instead.
+    ResetLayout,
 }
 
 #[relm4::factory(pub)]
@@ -782,6 +789,16 @@ impl FactoryComponent for Directory {
             DirectoryMessage::InvalidateCursor => {
                 // Positions shifted; marks are URI-keyed and survive on their own.
                 self.cursor.set(None);
+            }
+            DirectoryMessage::SetLayout(plan) => {
+                widgets.root.set_visible(plan.visible);
+                if plan.visible {
+                    widgets.root.set_width_request(plan.width);
+                }
+            }
+            DirectoryMessage::ResetLayout => {
+                widgets.root.set_visible(true);
+                widgets.root.set_width_request(WIDTH);
             }
         }
 
