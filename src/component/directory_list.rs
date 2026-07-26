@@ -151,25 +151,26 @@ impl Directory {
         }
     }
 
-    /// Returns the file info for the operation set: every marked entry plus
-    /// the GTK-selected rows (the cursor bar, or a mouse multi-selection).
+    /// Returns the file info an operation applies to: the marked entries, or
+    /// the row under the cursor when nothing is marked.
     ///
     /// This function does not perform any I/O.
     fn selected_file_info(&self) -> Vec<gio::FileInfo> {
         let marks = self.marks.borrow();
-        let mut out = Vec::new();
+        let mut marked = Vec::new();
+        let mut under_cursor = Vec::new();
 
         for pos in 0..self.list_model.n_items() {
             if let Some(info) = self.list_model.item(pos).and_downcast::<gio::FileInfo>() {
-                if self.list_model.is_selected(pos)
-                    || marks.contains(info.file().unwrap().uri().as_str())
-                {
-                    out.push(info);
+                if marks.contains(info.file().unwrap().uri().as_str()) {
+                    marked.push(info);
+                } else if self.list_model.is_selected(pos) {
+                    under_cursor.push(info);
                 }
             }
         }
 
-        out
+        operation_rows(marked, under_cursor)
     }
 
     /// Returns the file info under the keyboard cursor, if any.
@@ -1576,4 +1577,46 @@ fn fmt_file_info(info: &[gio::FileInfo]) -> impl Debug + '_ {
     }
 
     Formatter(info)
+}
+
+/// Picks the rows an operation applies to.
+///
+/// Marks win outright. Once entries are explicitly marked, the cursor is only
+/// where you happen to be standing — folding it into the batch means a Delete
+/// takes a file you never marked. Only with nothing marked does an operation
+/// fall back to the row under the cursor.
+///
+/// Same rule as ranger, which this fork follows: `Directory.get_selection`
+/// returns the marked items if there are any, and the pointed-at object
+/// otherwise (`ranger/container/directory.py:248`).
+fn operation_rows<T>(marked: Vec<T>, under_cursor: Vec<T>) -> Vec<T> {
+    if marked.is_empty() {
+        under_cursor
+    } else {
+        marked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::operation_rows;
+
+    #[test]
+    fn marked_entries_win_over_the_cursor() {
+        // The reported bug: with entries marked, Delete also trashed the row
+        // the cursor happened to be resting on.
+        let rows = operation_rows(vec!["a.txt", "b.txt"], vec!["under-cursor.txt"]);
+        assert_eq!(rows, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn the_cursor_acts_alone_when_nothing_is_marked() {
+        let rows = operation_rows(Vec::new(), vec!["under-cursor.txt"]);
+        assert_eq!(rows, vec!["under-cursor.txt"]);
+    }
+
+    #[test]
+    fn an_empty_listing_has_nothing_to_operate_on() {
+        assert!(operation_rows::<&str>(Vec::new(), Vec::new()).is_empty());
+    }
 }
