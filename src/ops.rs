@@ -73,7 +73,16 @@ pub async fn walk(root: &gio::File) -> Result<Vec<Node>, glib::Error> {
         }]);
     }
 
-    let mut nodes = Vec::new();
+    // The root itself is a node, exactly as a plain file is: `walk` promises
+    // everything that must exist at the destination, and the destination
+    // directory is the first thing that must. Without it every child copies
+    // into a parent that was never created.
+    let mut nodes = vec![Node {
+        source: root.clone(),
+        relative: PathBuf::new(),
+        is_dir: true,
+        size: 0,
+    }];
     let mut pending = vec![(root.clone(), PathBuf::new())];
 
     while let Some((directory, prefix)) = pending.pop() {
@@ -306,9 +315,12 @@ mod tests {
             .block_on(walk(&gio::File::for_path(&root)))
             .expect("the fixture is readable");
 
+        // The empty string is the root itself: the destination directory that
+        // has to exist before anything lands inside it.
         assert_eq!(
             relatives(&nodes),
             vec![
+                "",
                 "empty",
                 "sub",
                 "sub/deeper",
