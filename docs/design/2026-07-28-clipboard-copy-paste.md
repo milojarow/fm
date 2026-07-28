@@ -116,12 +116,17 @@ Following them would silently duplicate whole trees and can loop. (Not in the
 design as presented — added during review, for the same reason as the guard
 below.)
 
-**A directory is never pasted inside itself.** Copying `foo/` and pasting while
-standing inside `foo/` — or inside anything below it — would have the walk
-feeding itself and fill the disk. Before starting, every destination path is
-checked against every source: if the destination is the source or sits under it,
-that entry is skipped and reported. This is the one failure mode here that
-damages the machine rather than the file, so it is a hard guard, not a warning.
+**A directory is never pasted inside itself.** Before starting, every destination
+path is checked against every source: if the destination is the source or sits
+under it, that entry is skipped and reported.
+
+*Corrected after implementing.* This section first claimed such a paste would
+have the walk feeding itself and fill the disk. It would not: the walk completes
+before a single byte is copied, so the entry list is finite by construction and
+the two-phase design prevents runaway recursion on its own. The guard is still
+right — pasting a directory into itself is nonsense and produces a bizarre nested
+copy — but it protects against confusion, not against a full disk. Leaving an
+overstated warning in an approved document is its own kind of lie.
 
 ## Cut
 
