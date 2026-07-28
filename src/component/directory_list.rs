@@ -317,6 +317,9 @@ pub enum DirectoryMessage {
     /// Put this panel's operation set on the system clipboard.
     ClipboardCopy(crate::clipboard::ClipboardOp),
 
+    /// Paste the clipboard into this panel's directory.
+    ClipboardPaste,
+
     /// Whether this panel currently owns the keyboard cursor.
     SetCursorPanel(bool),
 
@@ -920,6 +923,85 @@ impl FactoryComponent for Directory {
                         n => format!("{n} files {verb}"),
                     }))
                     .unwrap();
+            }
+            DirectoryMessage::ClipboardPaste => {
+                let destination_dir = self.dir();
+                let clipboard = widgets.root.clipboard();
+                let sender = sender.clone();
+
+                relm4::spawn_local(async move {
+                    let Some((op, uris)) = read_file_clipboard(&clipboard).await else {
+                        sender
+                            .output(AppMsg::Toast("Nothing to paste".to_owned()))
+                            .unwrap();
+                        return;
+                    };
+
+                    let mut pasted = 0usize;
+                    let mut skipped = 0usize;
+
+                    for uri in uris {
+                        let source = gio::File::for_uri(&uri);
+
+                        let Some(name) = source.basename() else {
+                            skipped += 1;
+                            continue;
+                        };
+
+                        // Never paste a directory into itself or below itself:
+                        // the walk would feed itself and fill the disk. This is
+                        // the one failure here that damages the machine rather
+                        // than a file, so it is checked before anything else.
+                        if destination_dir.equal(&source) || destination_dir.has_prefix(&source) {
+                            warn!("refusing to paste {} into itself", source.uri());
+                            skipped += 1;
+                            continue;
+                        }
+
+                        // A cut landing where it already lives is a no-op, not
+                        // an error.
+                        if op == crate::clipboard::ClipboardOp::Cut
+                            && source.parent().as_ref() == Some(&destination_dir)
+                        {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        let name = name.to_string_lossy().into_owned();
+                        let target_name = crate::clipboard::free_name(&name, |candidate| {
+                            destination_dir
+                                .child(candidate)
+                                .query_exists(gio::Cancellable::NONE)
+                        });
+                        let target = destination_dir.child(&target_name);
+
+                        match op {
+                            crate::clipboard::ClipboardOp::Copy => {
+                                ops::copy_tree(source, target, sender.output_sender().clone()).await;
+                            }
+                            crate::clipboard::ClipboardOp::Cut => {
+                                ops::move_(source, target, sender.output_sender().clone()).await;
+                            }
+                        }
+
+                        pasted += 1;
+                    }
+
+                    // A cut clipboard is spent: its sources have moved, and a
+                    // second paste would fail on every one of them.
+                    if op == crate::clipboard::ClipboardOp::Cut && pasted > 0 {
+                        let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
+                    }
+
+                    let message = match (pasted, skipped) {
+                        (0, 0) => "Nothing to paste".to_owned(),
+                        (0, n) => format!("{n} skipped"),
+                        (1, 0) => "1 file pasted".to_owned(),
+                        (n, 0) => format!("{n} files pasted"),
+                        (n, s) => format!("{n} pasted, {s} skipped"),
+                    };
+                    sender.output(AppMsg::Toast(message)).unwrap();
+                });
             }
             DirectoryMessage::SetCursorPanel(owns_cursor) => {
                 self.is_cursor_panel.set(owns_cursor);
@@ -1628,6 +1710,56 @@ fn fmt_file_info(info: &[gio::FileInfo]) -> impl Debug + '_ {
     }
 
     Formatter(info)
+}
+
+/// Reads a file list off the clipboard.
+///
+/// The GNOME type is preferred because it carries the operation word. A bare
+/// `text/uri-list` — what a browser or a file picker offers — has no such word,
+/// so it is read as a copy: assuming a cut would delete another app's files.
+async fn read_file_clipboard(
+    clipboard: &gdk::Clipboard,
+) -> Option<(crate::clipboard::ClipboardOp, Vec<String>)> {
+    if let Ok((stream, _)) = clipboard
+        .read_future(&[crate::clipboard::GNOME_MIME], glib::Priority::DEFAULT)
+        .await
+    {
+        if let Some(payload) = read_stream_to_string(stream).await {
+            if let Some(parsed) = crate::clipboard::decode(&payload) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    let (stream, _) = clipboard
+        .read_future(&[crate::clipboard::URI_LIST_MIME], glib::Priority::DEFAULT)
+        .await
+        .ok()?;
+    let payload = read_stream_to_string(stream).await?;
+    let uris = crate::clipboard::decode_uri_list(&payload);
+
+    (!uris.is_empty()).then_some((crate::clipboard::ClipboardOp::Copy, uris))
+}
+
+/// Drains a clipboard stream into a string, discarding anything that is not
+/// valid UTF-8 — a clipboard payload that is not text is not a file list.
+async fn read_stream_to_string(stream: gio::InputStream) -> Option<String> {
+    let mut collected: Vec<u8> = Vec::new();
+
+    loop {
+        let (buffer, read) = stream
+            .read_future(vec![0u8; 4096], glib::Priority::DEFAULT)
+            .await
+            .ok()?;
+
+        if read == 0 {
+            break;
+        }
+
+        collected.extend_from_slice(&buffer[..read]);
+    }
+
+    String::from_utf8(collected).ok()
 }
 
 /// Picks the rows an operation applies to.

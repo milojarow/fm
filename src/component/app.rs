@@ -218,6 +218,9 @@ pub enum AppMsg {
     /// Put the cursor panel's operation set on the clipboard (`Ctrl+C`, `Ctrl+X`).
     ClipboardCopy(crate::clipboard::ClipboardOp),
 
+    /// Paste the clipboard into the cursor panel's directory (`Ctrl+V`).
+    ClipboardPaste,
+
     /// The columns area changed size; recompute the column widths.
     Relayout,
 
@@ -572,6 +575,10 @@ impl Component for AppModel {
                     gdk::Key::x | gdk::Key::X => {
                         key_sender
                             .input(AppMsg::ClipboardCopy(crate::clipboard::ClipboardOp::Cut));
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::v | gdk::Key::V => {
+                        key_sender.input(AppMsg::ClipboardPaste);
                         return glib::Propagation::Stop;
                     }
                     _ => {}
@@ -941,10 +948,21 @@ impl Component for AppModel {
                 }
             }
             AppMsg::ClipboardCopy(op) => {
-                if let Some(idx) = self.cursor_panel() {
-                    self.directories
-                        .send(idx, DirectoryMessage::ClipboardCopy(op));
-                }
+                let idx = self
+                    .cursor_panel()
+                    .unwrap_or_else(|| self.directories.len().saturating_sub(1));
+                self.directories
+                    .send(idx, DirectoryMessage::ClipboardCopy(op));
+            }
+            AppMsg::ClipboardPaste => {
+                // An empty directory has no rows, so no panel holds a cursor —
+                // and pasting into a directory you just made empty is the most
+                // ordinary paste there is. Fall back to the deepest panel, the
+                // same way SearchOpen, NavFirst and NavLast already do.
+                let idx = self
+                    .cursor_panel()
+                    .unwrap_or_else(|| self.directories.len().saturating_sub(1));
+                self.directories.send(idx, DirectoryMessage::ClipboardPaste);
             }
             AppMsg::TrashSelected => {
                 if let Some(idx) = self.cursor_panel() {
