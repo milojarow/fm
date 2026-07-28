@@ -89,9 +89,16 @@ impl Directory {
         self.directory_list().file().unwrap()
     }
 
-    /// Return the current selection.
-    pub fn selection(&self) -> Selection {
-        build_selection(&self.list_model, self.cursor.get(), &self.marks)
+    /// Whether the keyboard cursor lives in this panel.
+    ///
+    /// Marks deliberately do not count. A marked row is a selected row, so a
+    /// panel holding marks keeps reporting `Selection::Files` long after the
+    /// cursor left it — which used to pin the app's idea of the cursor panel
+    /// there and make `h` a dead key once anything was marked.
+    pub fn has_cursor(&self) -> bool {
+        self.cursor
+            .get()
+            .is_some_and(|pos| self.list_model.is_selected(pos))
     }
 
     /// Returns the underlying directory list model.

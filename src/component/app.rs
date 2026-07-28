@@ -83,13 +83,15 @@ impl AppModel {
         });
     }
 
-    /// Returns the index of the deepest panel holding the cursor (a selection).
+    /// Returns the index of the deepest panel holding the keyboard cursor.
+    ///
+    /// This asks each panel whether it holds the cursor, not whether it has any
+    /// selection: marks are selections too, so the old question kept answering
+    /// with a panel the cursor had already left.
     fn cursor_panel(&self) -> Option<usize> {
-        (0..self.directories.len()).rev().find(|&idx| {
-            self.directories
-                .get(idx)
-                .is_some_and(|dir| matches!(dir.selection(), Selection::Files(_)))
-        })
+        (0..self.directories.len())
+            .rev()
+            .find(|&idx| self.directories.get(idx).is_some_and(|dir| dir.has_cursor()))
     }
 
     /// Tells each panel whether it owns the keyboard cursor. Only that panel
