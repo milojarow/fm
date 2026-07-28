@@ -314,6 +314,9 @@ pub enum DirectoryMessage {
     /// no longer trustworthy.
     InvalidateCursor,
 
+    /// Put this panel's operation set on the system clipboard.
+    ClipboardCopy(crate::clipboard::ClipboardOp),
+
     /// Whether this panel currently owns the keyboard cursor.
     SetCursorPanel(bool),
 
@@ -869,6 +872,54 @@ impl FactoryComponent for Directory {
                 // Positions shifted; marks are URI-keyed and survive on their own.
                 self.cursor.set(None);
                 self.restyle_cursor();
+            }
+            DirectoryMessage::ClipboardCopy(op) => {
+                let uris: Vec<String> = self
+                    .selected_file_info()
+                    .iter()
+                    .filter_map(|info| info.file().map(|file| file.uri().to_string()))
+                    .collect();
+
+                if uris.is_empty() {
+                    sender
+                        .output(AppMsg::Toast("Nothing to copy".to_owned()))
+                        .unwrap();
+                    return;
+                }
+
+                let count = uris.len();
+
+                // Both types at once: the GNOME one carries copy-vs-cut, the
+                // uri-list is what file pickers and upload dialogs understand.
+                let gnome = gdk::ContentProvider::for_bytes(
+                    crate::clipboard::GNOME_MIME,
+                    &glib::Bytes::from_owned(crate::clipboard::encode(op, &uris).into_bytes()),
+                );
+                let uri_list = gdk::ContentProvider::for_bytes(
+                    crate::clipboard::URI_LIST_MIME,
+                    &glib::Bytes::from_owned(
+                        crate::clipboard::encode_uri_list(&uris).into_bytes(),
+                    ),
+                );
+
+                if let Err(err) = widgets
+                    .root
+                    .clipboard()
+                    .set_content(Some(&gdk::ContentProvider::new_union(&[gnome, uri_list])))
+                {
+                    warn!("unable to set the clipboard: {}", err);
+                }
+
+                let verb = match op {
+                    crate::clipboard::ClipboardOp::Copy => "copied",
+                    crate::clipboard::ClipboardOp::Cut => "cut",
+                };
+                sender
+                    .output(AppMsg::Toast(match count {
+                        1 => format!("1 file {verb}"),
+                        n => format!("{n} files {verb}"),
+                    }))
+                    .unwrap();
             }
             DirectoryMessage::SetCursorPanel(owns_cursor) => {
                 self.is_cursor_panel.set(owns_cursor);

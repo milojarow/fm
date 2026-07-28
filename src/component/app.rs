@@ -92,8 +92,6 @@ impl AppModel {
         })
     }
 
-    /// Applies the tapering column layout: ancestors thin out to the left, the
-    /// cursor's column stays centred, and the preview absorbs the remainder.
     /// Tells each panel whether it owns the keyboard cursor. Only that panel
     /// glows its cursor row; the ancestors keep their selection as a quiet
     /// breadcrumb, so exactly one row on screen says "you are here".
@@ -108,6 +106,8 @@ impl AppModel {
         }
     }
 
+    /// Applies the tapering column layout: ancestors thin out to the left, the
+    /// cursor's column stays centred, and the preview absorbs the remainder.
     fn relayout(&self, widgets: &AppWidgets) {
         let area = widgets.directory_panes_scroller.width();
         let cursor = self
@@ -214,6 +214,9 @@ pub enum AppMsg {
 
     /// Display a toast.
     Toast(String),
+
+    /// Put the cursor panel's operation set on the clipboard (`Ctrl+C`, `Ctrl+X`).
+    ClipboardCopy(crate::clipboard::ClipboardOp),
 
     /// The columns area changed size; recompute the column widths.
     Relayout,
@@ -551,6 +554,28 @@ impl Component for AppModel {
                 pending_sort.set(false);
                 pending_g.set(false);
                 return glib::Propagation::Proceed;
+            }
+
+            // Ctrl+C / Ctrl+X, ahead of the modifier bail below so every other
+            // accelerator (Ctrl+H for hidden files) still passes through. The
+            // focus guard above has already run, so these never fire while a
+            // text entry holds the caret — there, Ctrl+C copies text.
+            if state.contains(gdk::ModifierType::CONTROL_MASK)
+                && !state.contains(gdk::ModifierType::ALT_MASK)
+            {
+                match keyval {
+                    gdk::Key::c | gdk::Key::C => {
+                        key_sender
+                            .input(AppMsg::ClipboardCopy(crate::clipboard::ClipboardOp::Copy));
+                        return glib::Propagation::Stop;
+                    }
+                    gdk::Key::x | gdk::Key::X => {
+                        key_sender
+                            .input(AppMsg::ClipboardCopy(crate::clipboard::ClipboardOp::Cut));
+                        return glib::Propagation::Stop;
+                    }
+                    _ => {}
+                }
             }
 
             if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
@@ -913,6 +938,12 @@ impl Component for AppModel {
             AppMsg::ToggleMark => {
                 if let Some(idx) = self.cursor_panel() {
                     self.directories.send(idx, DirectoryMessage::ToggleMark);
+                }
+            }
+            AppMsg::ClipboardCopy(op) => {
+                if let Some(idx) = self.cursor_panel() {
+                    self.directories
+                        .send(idx, DirectoryMessage::ClipboardCopy(op));
                 }
             }
             AppMsg::TrashSelected => {
