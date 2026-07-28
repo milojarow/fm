@@ -11,7 +11,7 @@ pub mod clipboard;
 mod component;
 mod config;
 pub mod layout;
-mod ops;
+pub mod ops;
 pub mod path_title;
 mod util;
 
