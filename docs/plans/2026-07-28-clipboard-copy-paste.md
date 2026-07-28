@@ -338,7 +338,10 @@ mod tests {
     #[test]
     fn walking_a_tree_finds_every_file_and_directory() {
         let root = fixture("walk");
-        let nodes = glib::MainContext::default()
+        let nodes = // A fresh context per test: the default one can only be owned by a
+        // single thread, and GLib aborts the process when the parallel test
+        // runner has a second thread try to acquire it.
+        glib::MainContext::new()
             .block_on(walk(&gio::File::for_path(&root)))
             .expect("the fixture is readable");
 
@@ -371,7 +374,10 @@ mod tests {
     #[test]
     fn walking_a_plain_file_yields_that_file_alone() {
         let root = fixture("walk-file");
-        let nodes = glib::MainContext::default()
+        let nodes = // A fresh context per test: the default one can only be owned by a
+        // single thread, and GLib aborts the process when the parallel test
+        // runner has a second thread try to acquire it.
+        glib::MainContext::new()
             .block_on(walk(&gio::File::for_path(root.join("top.txt"))))
             .expect("the fixture is readable");
 
