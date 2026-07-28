@@ -101,14 +101,19 @@ the duration stops being visible in advance, and the scroll stays smooth.
 
 ## Errors
 
-A file that cannot be decoded leaves `MediaStream::error()` set. That produces
-`FilePreview::Error`, exactly as a document poppler cannot open already does, and
-the existing `error` page of the Stack shows it. A missing codec must not look
-like a player that simply refuses to start.
+A file that cannot be decoded leaves `MediaStream::error()` set.
 
-When the stream failed, `Enter` falls back to the system handler rather than
-toggling a player that cannot play. The file still opens — in mpv, as it did
-before this feature — instead of the key going dead.
+*Corrected while planning.* This section first said that produces
+`FilePreview::Error`, the way a document poppler cannot open already does. It
+cannot: poppler fails synchronously while the preview is being built, but
+GStreamer prepares asynchronously, so the dispatch has already chosen
+`FilePreview::Audio` and drawn the controls long before any error exists. A spec
+cannot demand a decision be made before the information arrives.
+
+What actually happens: the controls appear, preparation fails quietly, and the
+first `Enter` finds `error()` set and hands the file to the system handler
+instead of toggling a player that cannot play. The file still opens — in mpv, as
+it did before this feature — rather than the key going dead.
 
 ## Out of scope
 
