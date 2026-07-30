@@ -89,7 +89,20 @@ if [ -n "${AFTER_CMD:-}" ]; then
   WAYLAND_DISPLAY="$DISPLAY_NAME" bash -c "$AFTER_CMD"
 fi
 
-grep -i "panicked" "$OUT/fm.log" && echo "PANIC DETECTED" || echo "no panics"
+# A Rust panic is only one of the ways this process dies. GLib and GStreamer
+# abort on failed assertions, which print "Bail out!" and never the word
+# "panicked" — grepping for panics alone reported a clean run on a process that
+# had already crashed. Check for a live process too: nothing else proves it
+# survived the keystrokes.
+if grep -qiE "panicked|Bail out!|assertion failed|SIGSEGV|SIGABRT" "$OUT/fm.log"; then
+  echo "CRASH DETECTED:"
+  grep -iE "panicked|Bail out!|assertion failed|SIGSEGV|SIGABRT" "$OUT/fm.log" | head -3
+elif ! kill -0 "$FM_PID" 2>/dev/null; then
+  echo "CRASH DETECTED: fm exited before teardown"
+  tail -5 "$OUT/fm.log"
+else
+  echo "alive, no crash"
+fi
 
 # Kill by PID, children first. Never `pkill -f`: with -f the pattern matches
 # every command line including this script's own, so it kills the caller too.
