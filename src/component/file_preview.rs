@@ -43,6 +43,9 @@ enum FilePreview {
     /// Image file, to be displayed in [`FilePreviewWidgets::picture`].
     Image(gio::File),
 
+    /// Audio file, played by [`FilePreviewWidgets::audio_controls`].
+    Audio(gio::File),
+
     /// PDF document.
     Pdf(Pdf),
 
@@ -120,6 +123,7 @@ impl FilePreviewModel {
 
                 FilePreview::Image(file.file.clone())
             }
+            (mime::AUDIO, _) => FilePreview::Audio(file.file.clone()),
             (_, mime::PDF) => {
                 // TODO: This should be async.
                 match poppler::Document::from_gfile(&file.file, None, gio::Cancellable::NONE) {
@@ -238,6 +242,24 @@ impl Component for FilePreviewModel {
                         set_valign: gtk::Align::Center,
                         set_vexpand: true,
                         set_can_shrink: true,
+                    },
+
+                    #[name = "audio_container"]
+                    gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_halign: gtk::Align::Center,
+                        set_valign: gtk::Align::Center,
+                        set_spacing: 12,
+
+                        gtk::Image {
+                            set_icon_name: Some("audio-x-generic-symbolic"),
+                            set_pixel_size: 96,
+                        },
+
+                        #[name = "audio_controls"]
+                        gtk::MediaControls {
+                            set_hexpand: true,
+                        },
                     },
 
                     #[name = "text_container"]
@@ -492,6 +514,38 @@ impl Component for FilePreviewModel {
 
         match &self.preview {
             Some(FilePreview::Image(_)) => (),
+            Some(FilePreview::Audio(file)) => {
+                // `pre_view` runs on every view update, not only when the
+                // selection changes. Rebuilding unconditionally would restart
+                // playback on every keystroke, so the stream is replaced only
+                // when it really is a different file.
+                let current = widgets
+                    .audio_controls
+                    .media_stream()
+                    .and_downcast::<gtk::MediaFile>()
+                    .and_then(|media| media.file());
+
+                if current.as_ref() != Some(file) {
+                    // Silence the outgoing stream explicitly rather than
+                    // trusting finalisation order to do it. This is the line
+                    // that makes two files unable to overlap.
+                    if let Some(previous) = widgets.audio_controls.media_stream() {
+                        previous.pause();
+                    }
+
+                    // Built unprepared, on purpose. Preparing eagerly to show
+                    // the duration up front meant calling `play` then `pause`
+                    // at once, and that races decodebin3's stream-collection
+                    // setup: GStreamer aborts the whole process with
+                    // `mq_slot_handle_stream_start: assertion failed
+                    // (collection)`. The duration appears on the first play
+                    // instead. Measured, not guessed — it crashed on an mp3.
+                    let stream = gtk::MediaFile::for_file(file);
+                    widgets.audio_controls.set_media_stream(Some(&stream));
+                }
+
+                widgets.stack.set_visible_child(&widgets.audio_container);
+            }
             Some(FilePreview::Icon(paintable)) => {
                 widgets.icon_picture.set_paintable(Some(paintable));
                 widgets.stack.set_visible_child(&widgets.icon);
