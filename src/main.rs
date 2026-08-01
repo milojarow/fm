@@ -32,6 +32,10 @@ fn main() -> Result<()> {
     // Call `gtk::init` manually because we instantiate GTK types in the app model.
     gtk::init().unwrap();
 
+    // The audio preview drives a GStreamer pipeline directly; the library has
+    // to be initialised once before any element is built.
+    gstreamer::init().expect("unable to initialise GStreamer");
+
     relm4::set_global_css(include_str!("styles.css"));
     let app = RelmApp::new("io.github.fm").with_args(vec![]);
     app.run::<AppModel>(fs::canonicalize(args.file)?);

@@ -67,6 +67,13 @@ pub struct FileInfo {
 #[derive(Debug)]
 pub struct FilePreviewModel {
     info: Vec<FileInfo>,
+
+    /// The pipeline for the audio under the cursor, if any. Behind a RefCell
+    /// because `pre_view` only gets `&self` and that is where the selection
+    /// change is noticed. Exactly one can exist, which is what makes two files
+    /// unable to play at once.
+    player: std::rc::Rc<std::cell::RefCell<Option<crate::audio::Player>>>,
+
     preview: Option<FilePreview>,
     abort_preview: Option<AbortHandle>,
     file_name_text: String,
@@ -123,18 +130,7 @@ impl FilePreviewModel {
 
                 FilePreview::Image(file.file.clone())
             }
-            // mp3 is deliberately excluded. Handing an `audio/mpeg` stream to
-            // `MediaControls` aborts the whole process on this GStreamer:
-            // `gstdecodebin3.c:3381: mq_slot_handle_stream_start: assertion
-            // failed (collection)`. That is a GLib assertion — fatal and
-            // uncatchable from Rust — and it reproduces in 25 lines of Python
-            // with no fm involved, so there is nothing to fix on this side.
-            // Every other audio format tested (ogg, opus, flac, wav, m4a) is
-            // fine. mp3 falls through to the icon and opens in its usual
-            // handler, exactly as it did before this feature existed.
-            (mime::AUDIO, subtype) if subtype != "mpeg" => {
-                FilePreview::Audio(file.file.clone())
-            }
+            (mime::AUDIO, _) => FilePreview::Audio(file.file.clone()),
             (_, mime::PDF) => {
                 // TODO: This should be async.
                 match poppler::Document::from_gfile(&file.file, None, gio::Cancellable::NONE) {
@@ -267,9 +263,29 @@ impl Component for FilePreviewModel {
                             set_pixel_size: 96,
                         },
 
-                        #[name = "audio_controls"]
-                        gtk::MediaControls {
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Horizontal,
+                            set_spacing: 8,
                             set_hexpand: true,
+
+                            #[name = "audio_button"]
+                            gtk::Button {
+                                set_icon_name: "media-playback-start-symbolic",
+                                add_css_class: "circular",
+                            },
+
+                            #[name = "audio_scale"]
+                            gtk::Scale {
+                                set_hexpand: true,
+                                set_draw_value: false,
+                                set_width_request: 220,
+                            },
+
+                            #[name = "audio_time"]
+                            gtk::Label {
+                                set_label: "--:-- / --:--",
+                                add_css_class: "file-preview",
+                            },
                         },
                     },
 
@@ -397,6 +413,7 @@ impl Component for FilePreviewModel {
     fn init(_: (), root: Self::Root, _sender: ComponentSender<Self>) -> ComponentParts<Self> {
         let model = FilePreviewModel {
             info: vec![],
+            player: Default::default(),
             abort_preview: None,
             cursor_leads: false,
             created_text: String::new(),
@@ -418,6 +435,100 @@ impl Component for FilePreviewModel {
             buffer.set_style_scheme(Some(scheme));
         }
 
+
+        // The transport row is hand-driven: `gtk::MediaControls` would have
+        // donated all of this, but it aborts the process on mp3 (see
+        // `crate::audio`). One timeout paints the bar, the button toggles, and
+        // the scale seeks when released.
+        widgets.audio_scale.set_range(0.0, 1.0);
+
+        let seeking = std::rc::Rc::new(std::cell::Cell::new(false));
+
+        let gesture = gtk::GestureClick::new();
+        gesture.connect_pressed(glib::clone!(
+            #[strong]
+            seeking,
+            move |_, _, _, _| seeking.set(true)
+        ));
+        gesture.connect_released(glib::clone!(
+            #[strong]
+            seeking,
+            #[strong(rename_to = player)]
+            model.player,
+            #[weak(rename_to = scale)]
+            widgets.audio_scale,
+            move |_, _, _, _| {
+                if let Some(active) = player.borrow().as_ref() {
+                    if let Some(total) = active.duration() {
+                        active.seek((scale.value() * total as f64) as u64);
+                    }
+                }
+                seeking.set(false);
+            }
+        ));
+        widgets.audio_scale.add_controller(gesture);
+
+        widgets.audio_button.connect_clicked(glib::clone!(
+            #[strong(rename_to = player)]
+            model.player,
+            move |_| {
+                if let Some(active) = player.borrow().as_ref() {
+                    if active.is_playing() {
+                        active.pause();
+                    } else {
+                        active.play();
+                    }
+                }
+            }
+        ));
+
+        glib::timeout_add_local(
+            std::time::Duration::from_millis(200),
+            glib::clone!(
+                #[strong]
+                seeking,
+                #[strong(rename_to = player)]
+                model.player,
+                #[weak(rename_to = scale)]
+                widgets.audio_scale,
+                #[weak(rename_to = time)]
+                widgets.audio_time,
+                #[weak(rename_to = button)]
+                widgets.audio_button,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    if let Some(active) = player.borrow().as_ref() {
+                        let position = active.position();
+                        let total = active.duration();
+
+                        time.set_label(&format!(
+                            "{} / {}",
+                            crate::audio::format_clock(position),
+                            crate::audio::format_clock(total)
+                        ));
+
+                        // Never fight the hand on the slider.
+                        if !seeking.get() {
+                            if let (Some(position), Some(total)) = (position, total) {
+                                if total > 0 {
+                                    scale.set_value(position as f64 / total as f64);
+                                }
+                            }
+                        }
+
+                        button.set_icon_name(if active.is_playing() {
+                            "media-playback-pause-symbolic"
+                        } else {
+                            "media-playback-start-symbolic"
+                        });
+                    }
+
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+
         ComponentParts { model, widgets }
     }
 
@@ -431,6 +542,35 @@ impl Component for FilePreviewModel {
         info!("received message: {:?}", msg);
 
         match msg {
+            FilePreviewMsg::ToggleAudio => {
+                let player = self.player.borrow();
+                let Some(active) = player.as_ref() else {
+                    return;
+                };
+
+                if let Some(message) = active.error() {
+                    // A file GStreamer cannot decode. Toggling a player that
+                    // cannot play would make the key look dead, so hand it to
+                    // the system handler — which is what opened it before this
+                    // feature existed.
+                    warn!("audio pipeline failed: {}", message);
+                    if let Some(FilePreview::Audio(file)) = &self.preview {
+                        if let Err(e) = gio::AppInfo::launch_default_for_uri(
+                            file.uri().as_str(),
+                            None::<&gio::AppLaunchContext>,
+                        ) {
+                            error!("unable to open audio externally: {}", e);
+                        }
+                    }
+                    return;
+                }
+
+                if active.is_playing() {
+                    active.pause();
+                } else {
+                    active.play();
+                }
+            }
             FilePreviewMsg::Hide => {
                 self.info = vec![];
                 self.update_view(widgets, sender);
@@ -528,31 +668,22 @@ impl Component for FilePreviewModel {
             Some(FilePreview::Audio(file)) => {
                 // `pre_view` runs on every view update, not only when the
                 // selection changes. Rebuilding unconditionally would restart
-                // playback on every keystroke, so the stream is replaced only
-                // when it really is a different file.
-                let current = widgets
-                    .audio_controls
-                    .media_stream()
-                    .and_downcast::<gtk::MediaFile>()
-                    .and_then(|media| media.file());
+                // playback on every keystroke, so the pipeline is replaced only
+                // when it really is a different file. Assigning here drops the
+                // outgoing player, whose `Drop` drives it to `State::Null`.
+                let uri = file.uri().to_string();
+                let stale = self
+                    .player
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(|player| player.uri() != uri);
 
-                if current.as_ref() != Some(file) {
-                    // Silence the outgoing stream explicitly rather than
-                    // trusting finalisation order to do it. This is the line
-                    // that makes two files unable to overlap.
-                    if let Some(previous) = widgets.audio_controls.media_stream() {
-                        previous.pause();
-                    }
-
-                    // Built unprepared, on purpose. Preparing eagerly to show
-                    // the duration up front meant calling `play` then `pause`
-                    // at once, and that races decodebin3's stream-collection
-                    // setup: GStreamer aborts the whole process with
-                    // `mq_slot_handle_stream_start: assertion failed
-                    // (collection)`. The duration appears on the first play
-                    // instead. Measured, not guessed — it crashed on an mp3.
-                    let stream = gtk::MediaFile::for_file(file);
-                    widgets.audio_controls.set_media_stream(Some(&stream));
+                if stale {
+                    *self.player.borrow_mut() = crate::audio::Player::new(&uri);
+                    widgets
+                        .audio_button
+                        .set_icon_name("media-playback-start-symbolic");
+                    widgets.audio_scale.set_value(0.0);
                 }
 
                 widgets.stack.set_visible_child(&widgets.audio_container);
@@ -619,6 +750,9 @@ pub enum FilePreviewMsg {
 
     /// Change PDF page.
     ChangePdfPage(PdfPageChange),
+
+    /// Start or stop the audio in the preview.
+    ToggleAudio,
 
     /// Empty the contents of the preview.
     Hide,

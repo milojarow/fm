@@ -223,6 +223,9 @@ pub enum AppMsg {
     /// Paste the clipboard into the cursor panel's directory (`Ctrl+V`).
     ClipboardPaste,
 
+    /// Start or stop the audio in the preview (`Enter` on an audio file).
+    ToggleAudioPreview,
+
     /// The columns area changed size; recompute the column widths.
     Relayout,
 
@@ -965,6 +968,9 @@ impl Component for AppModel {
                     .cursor_panel()
                     .unwrap_or_else(|| self.directories.len().saturating_sub(1));
                 self.directories.send(idx, DirectoryMessage::ClipboardPaste);
+            }
+            AppMsg::ToggleAudioPreview => {
+                self.file_preview.emit(FilePreviewMsg::ToggleAudio);
             }
             AppMsg::TrashSelected => {
                 if let Some(idx) = self.cursor_panel() {

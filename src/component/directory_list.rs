@@ -835,7 +835,18 @@ impl FactoryComponent for Directory {
             }
             DirectoryMessage::OpenSelected => {
                 if let Some(info) = self.cursor_file_info().as_ref() {
-                    open_application_for_file(&info.file().unwrap(), &sender);
+                    // The panel already holds the content type, so it decides
+                    // here rather than making the app ask for data it has.
+                    let is_audio = info
+                        .content_type()
+                        .and_then(|content_type| gio::content_type_get_mime_type(&content_type))
+                        .is_some_and(|mime| mime.starts_with("audio/"));
+
+                    if is_audio {
+                        sender.output(AppMsg::ToggleAudioPreview).unwrap();
+                    } else {
+                        open_application_for_file(&info.file().unwrap(), &sender);
+                    }
                 }
             }
             DirectoryMessage::AutoSelectIfPending => {

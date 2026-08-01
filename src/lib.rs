@@ -7,6 +7,7 @@
 #![warn(clippy::print_stdout)]
 #![warn(clippy::todo)]
 
+pub mod audio;
 pub mod clipboard;
 mod component;
 mod config;
