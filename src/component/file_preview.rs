@@ -123,7 +123,18 @@ impl FilePreviewModel {
 
                 FilePreview::Image(file.file.clone())
             }
-            (mime::AUDIO, _) => FilePreview::Audio(file.file.clone()),
+            // mp3 is deliberately excluded. Handing an `audio/mpeg` stream to
+            // `MediaControls` aborts the whole process on this GStreamer:
+            // `gstdecodebin3.c:3381: mq_slot_handle_stream_start: assertion
+            // failed (collection)`. That is a GLib assertion — fatal and
+            // uncatchable from Rust — and it reproduces in 25 lines of Python
+            // with no fm involved, so there is nothing to fix on this side.
+            // Every other audio format tested (ogg, opus, flac, wav, m4a) is
+            // fine. mp3 falls through to the icon and opens in its usual
+            // handler, exactly as it did before this feature existed.
+            (mime::AUDIO, subtype) if subtype != "mpeg" => {
+                FilePreview::Audio(file.file.clone())
+            }
             (_, mime::PDF) => {
                 // TODO: This should be async.
                 match poppler::Document::from_gfile(&file.file, None, gio::Cancellable::NONE) {
