@@ -499,6 +499,10 @@ impl Component for FilePreviewModel {
                 glib::ControlFlow::Break,
                 move || {
                     if let Some(active) = player.borrow().as_ref() {
+                        // Put a finished file back at its start, so pressing
+                        // play again replays it instead of doing nothing.
+                        active.rewind_if_finished();
+
                         let position = active.position();
                         let total = active.duration();
 

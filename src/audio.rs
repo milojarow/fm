@@ -52,15 +52,54 @@ impl Player {
     }
 
     pub fn play(&self) {
+        // A pipeline that reached the end sits in `Playing` at its final
+        // position, where asking for `Playing` again changes nothing — the key
+        // would look dead. Rewind first, so play always means play.
+        if let (Some(position), Some(total)) = (self.position(), self.duration()) {
+            if position >= total {
+                self.seek(0);
+            }
+        }
+
         let _ = self.pipeline.set_state(gst::State::Playing);
+    }
+
+    /// Returns the pipeline to the start, paused, once the file has finished.
+    ///
+    /// GStreamer leaves a finished pipeline in `Playing` parked on the last
+    /// sample, so without this the transport row keeps showing a pause button
+    /// over something silent, and the next keypress reads as "pause" instead of
+    /// "play again". Called from the preview's tick.
+    pub fn rewind_if_finished(&self) -> bool {
+        let Some(bus) = self.pipeline.bus() else {
+            return false;
+        };
+
+        if bus.pop_filtered(&[gst::MessageType::Eos]).is_none() {
+            return false;
+        }
+
+        self.pause();
+        self.seek(0);
+        true
     }
 
     pub fn pause(&self) {
         let _ = self.pipeline.set_state(gst::State::Paused);
     }
 
+    /// Whether sound is actually coming out. A pipeline parked at the end of
+    /// the file is still in `Playing`, but nothing is playing, and reporting
+    /// that as playing makes a toggle send `pause` to something already silent.
     pub fn is_playing(&self) -> bool {
-        self.pipeline.current_state() == gst::State::Playing
+        if self.pipeline.current_state() != gst::State::Playing {
+            return false;
+        }
+
+        match (self.position(), self.duration()) {
+            (Some(position), Some(total)) => position < total,
+            _ => true,
+        }
     }
 
     /// Nanoseconds played so far, once the pipeline can answer.
