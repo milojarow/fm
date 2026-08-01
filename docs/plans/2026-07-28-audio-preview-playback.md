@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **SUPERSEDED 2026-08-01.** Only Task 1 was executed as written, and it shipped
+> a crash: `gtk::MediaControls` aborts the process on mp3. What actually shipped
+> drives a plain GStreamer `playbin` instead — see the design doc's *The engine*
+> section and `src/audio.rs`. Tasks 2 and 3 below still describe the
+> `MediaControls` API and are kept only as the record of what was tried.
+
 **Goal:** Play audio inside the preview with real controls, so a file can be stopped and two files can never overlap.
 
 **Architecture:** A new `FilePreview::Audio` variant puts a `gtk::MediaControls` widget on its own Stack page. The `MediaFile` stream is owned by that widget, so changing selection destroys it — overlap becomes unrepresentable rather than defended against. `Enter` on an audio file toggles the stream instead of launching mpv.
