@@ -68,6 +68,11 @@ pub struct Directory {
     #[educe(Debug(ignore))]
     cursor: std::rc::Rc<std::cell::Cell<Option<u32>>>,
 
+    /// URI of the file under the cursor, so the cursor can follow the file
+    /// rather than an index when the listing shifts underneath it.
+    #[educe(Debug(ignore))]
+    cursor_uri: std::rc::Rc<RefCell<Option<String>>>,
+
     /// URIs marked with Space. Marks live outside the GTK selection (the
     /// selection is the cursor bar alone), render in their own style, and
     /// being URI-keyed they survive sorting and refreshes.
@@ -144,6 +149,12 @@ impl Directory {
 
         // The GTK selection is the cursor bar alone; marks render separately.
         self.cursor.set(Some(pos));
+        *self.cursor_uri.borrow_mut() = self
+            .list_model
+            .item(pos)
+            .and_downcast::<gio::FileInfo>()
+            .and_then(|info| info.file())
+            .map(|file| file.uri().to_string());
         self.list_model.select_item(pos, true);
         self.restyle_cursor();
 
@@ -443,6 +454,7 @@ impl FactoryComponent for Directory {
             bound_rows: Default::default(),
             select_first_on_load,
             cursor: Default::default(),
+            cursor_uri: Default::default(),
             marks: Default::default(),
             is_cursor_panel: Default::default(),
             sliver: Default::default(),
@@ -880,8 +892,48 @@ impl FactoryComponent for Directory {
             }
             DirectoryMessage::InvalidateCursor => {
                 // Positions shifted; marks are URI-keyed and survive on their own.
-                self.cursor.set(None);
-                self.restyle_cursor();
+                //
+                // The cursor must not simply be dropped here. A panel without a
+                // cursor stops being the cursor panel, so clearing it made the
+                // app believe the cursor had moved to the parent: deleting a
+                // file looked like jumping a level up the tree.
+                //
+                // Follow the file rather than the index. A re-sort moves it
+                // somewhere else entirely, and after a delete it is gone — then
+                // the old index is the honest fallback, because the row that
+                // took its place is where the eye already is.
+                let n = self.list_model.n_items();
+
+                let Some(previous) = self.cursor.get() else {
+                    return;
+                };
+
+                if n == 0 {
+                    self.cursor.set(None);
+                    self.restyle_cursor();
+                    return;
+                }
+
+                let wanted = self.cursor_uri.borrow().clone();
+                let found = wanted.and_then(|uri| {
+                    (0..n).find(|&pos| {
+                        self.list_model
+                            .item(pos)
+                            .and_downcast::<gio::FileInfo>()
+                            .and_then(|info| info.file())
+                            .is_some_and(|file| file.uri() == uri)
+                    })
+                });
+
+                let landed = found.unwrap_or_else(|| previous.min(n - 1));
+                self.select_and_scroll(&widgets.scroller, landed);
+
+                // Say so out loud. `select_item` emits nothing when the row it
+                // lands on is one GTK had already kept selected, so the app
+                // would never re-evaluate which panel holds the cursor and
+                // would keep drawing the title, the glow and the layout one
+                // level up — which is exactly what a delete looked like.
+                send_new_selection(&self.list_model, &sender, self.cursor.get(), &self.marks);
             }
             DirectoryMessage::ClipboardCopy(op) => {
                 let uris: Vec<String> = self
