@@ -34,23 +34,66 @@ Measured before designing, not assumed.
 | Why? | `gst-plugins-good` was not installed. Decoders were fine (196 plugins, 6 mp3 decoders via `gst-libav` and `gst-plugins-ugly`); the missing piece was the output sink selector. |
 | After installing it? | `prepared: true`, `has_audio: true`, `seekable: true`, duration 68.1 s against `ffprobe`'s 68.06, timestamp advancing. |
 
+**Revised 2026-08-01, after shipping the first attempt and watching it crash.**
+`gtk::MediaControls` aborts the process on any mp3:
+
+```
+gstdecodebin3.c:3381: mq_slot_handle_stream_start: assertion failed (collection)
+Bail out!
+```
+
+It is a GLib assertion — fatal, and uncatchable from Rust. Reproduced in 25
+lines of Python with no `fm` involved, and bisected to the exact call:
+constructing the `MediaFile` is fine, `set_media_stream` is what dies. Every
+other format tested (ogg, opus, flac, wav, m4a) was unaffected.
+
+The operator's own `peek` had already hit this and solved it, and its source
+says so in a comment: `Gtk.MediaFile` is not GStreamer, it is a convenience
+wrapper that forces `GstPlay → playbin3 → decodebin3`, and that chain is what
+breaks. **Plain `playbin` decodes the same files without complaint.** Measured
+from Rust against the very mp3 that kills `MediaControls`:
+
+| file | duration reported | position | pause | seek | outcome |
+|---|---|---|---|---|---|
+| 9 s mp3 | 9.038 s | advances | holds | yes | survives, tears down clean |
+| 68 s opus | 68.060 s (ffprobe: 68.062) | advances | holds | yes | survives, tears down clean |
+
+So the engine is one layer lower than first designed, and no format is lost.
+
 `gst-plugins-good` was installed during design with the operator's approval:
 2.78 MiB download, 8.56 MiB on disk, and `pacman -Sp` confirmed it pulled no new
 dependencies. It is worth recording that this gap was not specific to `fm` — any
 GTK4 application attempting media playback on this machine failed the same way.
 
-## The widget
+## The engine
 
-`gtk::MediaControls` — play/pause, a draggable progress bar, volume, and
-elapsed/total time, all supplied by GTK. Constructed as
-`MediaControls::new(Some(&stream))` where the stream is a
-`gtk::MediaFile::for_file(&file)`. Nothing here is hand-drawn or hand-wired.
+A plain GStreamer `playbin`, built through the `gstreamer` crate. The C library
+is already installed and is already a hard dependency of gtk4; only the Rust
+bindings are added.
+
+The whole surface is six calls, the same ones `peek` uses:
+
+```
+ElementFactory::make("playbin").property("uri", uri)
+set_state(Playing)  set_state(Paused)  set_state(Null)
+query_position::<ClockTime>()          query_duration::<ClockTime>()
+```
+
+`gtk::MediaControls` is deliberately **not** used, and neither is
+`gtk::MediaFile` beneath it. See the evidence above: that path aborts the
+process on mp3, and mp3 is too common to design around.
+
+The cost of dropping a layer is that the transport row is drawn by hand — a
+play/pause button, a draggable progress bar, and an elapsed/total label, ticked
+by a 200 ms timeout that queries position and duration. That is the work
+`MediaControls` used to donate.
 
 ## Why overlap stops being possible
 
-The `MediaFile` is **owned by the preview**. When the cursor moves to another
-file, the preview rebuilds its content: the previous stream is paused and
-dropped before the new one exists.
+The `playbin` is **owned by the preview**. When the cursor moves to another
+file, the preview rebuilds its content: the previous pipeline is driven to
+`State::Null` before the new one exists — an explicit teardown, not a hope
+about drop order.
 
 There is no "stop the previous player" code path, because two streams never
 exist at once. The bug is not fixed so much as made unrepresentable.
@@ -66,12 +109,13 @@ preview — a persistent bar — which is a different feature and out of scope.
 FilePreview::Audio(gio::File)     new enum variant, beside Image / Pdf / Text
   dispatched by (mime::AUDIO, _)  in file_preview.rs:108
 
-"audio" page in the preview Stack file icon, name, and the MediaControls widget
+"audio" page in the preview Stack file icon, name, and a hand-drawn transport
+                                 row: play/pause, progress bar, elapsed/total
 ```
 
-The model holds the `MediaFile`. Replacing the preview pauses the outgoing
-stream explicitly before dropping it, rather than relying on finalisation order
-to silence it.
+The model holds the `playbin` and the id of its tick timeout. Replacing the
+preview drives the outgoing pipeline to `State::Null` and cancels its tick,
+rather than relying on drop order to silence it.
 
 ## Keys
 
@@ -86,34 +130,28 @@ panel for data it already has.
 Everything that is not audio opens exactly as before. **Video still goes to
 mpv** — it was not asked for, and it needs `GtkVideo`, a different widget.
 
-## Preparing, and the risk it carries
+## Prerolling, and the risk it carries
 
-Showing the duration before the first `Enter` requires the stream to be
-*prepared*, which builds a GStreamer pipeline. The preview prepares on selection,
-so moving through a directory of fifty audio files builds and tears down fifty
-pipelines.
+The duration is only known once the pipeline has prerolled, which is what
+`State::Paused` does. The preview prerolls on selection, so moving through a
+directory of fifty audio files builds and tears down fifty pipelines.
 
-This is expected to be fine — preparing opens no audio output, and the preview
-already does comparable work loading textures and reading up to 256 KiB of text
-— but it is a measurable claim and the implementation must measure it, not
-assume it. If scrolling drags, the fallback is to prepare only on `Enter`:
-the duration stops being visible in advance, and the scroll stays smooth.
+Prerolling opens no audio output — that is the difference between `Paused` and
+`Playing`, and it is why this is safe where the old eager `play()`/`pause()`
+pair was not. It is still a measurable claim about cost, and the implementation
+must measure it rather than assume it. If scrolling drags, the fallback is to
+build the pipeline only on `Enter`: the duration stops being visible in advance,
+and the scroll stays smooth.
 
 ## Errors
 
-A file that cannot be decoded leaves `MediaStream::error()` set.
+A file GStreamer cannot decode posts an error on the `playbin` bus. The preview
+watches that bus and, on an error, swaps the transport row for the message —
+the same place a poppler failure already lands.
 
-*Corrected while planning.* This section first said that produces
-`FilePreview::Error`, the way a document poppler cannot open already does. It
-cannot: poppler fails synchronously while the preview is being built, but
-GStreamer prepares asynchronously, so the dispatch has already chosen
-`FilePreview::Audio` and drawn the controls long before any error exists. A spec
-cannot demand a decision be made before the information arrives.
-
-What actually happens: the controls appear, preparation fails quietly, and the
-first `Enter` finds `error()` set and hands the file to the system handler
-instead of toggling a player that cannot play. The file still opens — in mpv, as
-it did before this feature — rather than the key going dead.
+`Enter` on a pipeline that errored hands the file to the system handler rather
+than toggling a player that cannot play. The file still opens — in mpv, as it
+did before this feature — rather than the key going dead.
 
 ## Out of scope
 
