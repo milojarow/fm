@@ -14,6 +14,7 @@ mod config;
 pub mod layout;
 pub mod ops;
 pub mod path_title;
+pub mod transfer;
 mod util;
 
 pub use component::app::AppModel;

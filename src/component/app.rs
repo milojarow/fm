@@ -45,6 +45,21 @@ pub struct AppModel {
     /// toast if theirs is still the newest.
     toast_epoch: std::rc::Rc<std::cell::Cell<u64>>,
 
+    /// The running transfers, as the corner indicator sees them.
+    ///
+    /// Kept here rather than read back from the progress children: sending a
+    /// child a message only queues it, so reading their models in the same turn
+    /// returns the previous state. With byte-level progress arriving hundreds
+    /// of times a second that lag is invisible; a same-filesystem copy reports
+    /// exactly twice, and the indicator would show the placeholder for the
+    /// whole copy.
+    transfers: Vec<(u64, crate::transfer::Active)>,
+
+    /// True while a transfer is running that cannot say how far along it is.
+    /// A copy inside one filesystem is exactly that: `copy_file_range` blocks
+    /// in a single call and reports nothing until it finishes.
+    transfer_indeterminate: std::rc::Rc<std::cell::Cell<bool>>,
+
     /// True while the columns area is too narrow for a computed layout and the
     /// panels fall back to uniform widths. Those overflow the scroller, so the
     /// view has to follow the newest column the way it did before the tapering
@@ -65,6 +80,8 @@ impl AppModel {
 
     /// Shows `message` in the bottom-left corner toast for a few seconds.
     fn show_toast(&self, widgets: &AppWidgets, message: &str) {
+        // A toast takes the slot back from any progress bar sharing it.
+        widgets.corner_progress.set_visible(false);
         widgets.corner_toast_label.set_text(message);
         widgets.corner_toast.set_reveal_child(true);
 
@@ -81,6 +98,65 @@ impl AppModel {
             }
             glib::ControlFlow::Break
         });
+    }
+
+    /// Repaints the corner indicator from the transfers currently running, and
+    /// hides the header button once none are.
+    ///
+    /// The label is only touched while the bar is showing: before the threshold
+    /// elapses the slot still belongs to whatever toast was there, and stealing
+    /// its text for a copy that is about to finish anyway would be noise.
+    fn refresh_transfers(&self, widgets: &AppWidgets) {
+        let active: Vec<crate::transfer::Active> = self
+            .transfers
+            .iter()
+            .map(|(_, transfer)| transfer.clone())
+            .collect();
+
+        widgets
+            .transfer_progress_button
+            .set_visible(!active.is_empty());
+
+        match crate::transfer::summarize(&active) {
+            None => {
+                // The bar being visible is what says the slot belongs to a
+                // transfer — no need to sniff the label's text for a verb,
+                // which would break the moment a string changes.
+                if widgets.corner_progress.is_visible() {
+                    widgets.corner_progress.set_visible(false);
+                    widgets.corner_toast.set_reveal_child(false);
+                }
+            }
+            Some((description, fraction)) => {
+                self.transfer_indeterminate.set(fraction.is_none());
+
+                if widgets.corner_progress.is_visible() {
+                    widgets.corner_toast_label.set_text(&description);
+
+                    let total: i64 = active.iter().map(|transfer| transfer.total).sum();
+
+                    match fraction {
+                        Some(fraction) => {
+                            let bytes: i64 = active.iter().map(|t| t.current).sum();
+                            widgets.corner_progress.set_fraction(fraction);
+                            widgets.corner_progress.set_text(Some(&format!(
+                                "{} / {}",
+                                glib::format_size(bytes.max(0) as u64),
+                                glib::format_size(total.max(0) as u64),
+                            )));
+                        }
+                        None => {
+                            // The pulse timer animates the bar; all this can
+                            // honestly say is how much there is to move.
+                            widgets.corner_progress.set_text(Some(&format!(
+                                "{} to copy",
+                                glib::format_size(total.max(0) as u64)
+                            )));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Returns the index of the deepest panel holding the keyboard cursor.
@@ -190,6 +266,10 @@ impl AppModel {
 pub enum Transfer {
     New { id: u64, description: String },
     Progress(Progress),
+
+    /// The transfer ended, successfully or not. Without this the row lives
+    /// forever and the header keeps a spinner over finished work.
+    Done { id: u64 },
 }
 
 #[derive(Debug)]
@@ -225,6 +305,10 @@ pub enum AppMsg {
 
     /// Start or stop the audio in the preview (`Enter` on an audio file).
     ToggleAudioPreview,
+
+    /// The transfer threshold elapsed: show the indicator if anything is
+    /// still running.
+    RevealTransfer,
 
     /// The columns area changed size; recompute the column widths.
     Relayout,
@@ -397,9 +481,22 @@ impl Component for AppModel {
                     set_can_target: false,
 
                     #[wrap(Some)]
-                    #[name = "corner_toast_label"]
-                    set_child = &gtk::Label {
+                    set_child = &gtk::Box {
                         add_css_class: "corner-toast",
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 6,
+
+                        #[name = "corner_toast_label"]
+                        gtk::Label {
+                            set_halign: gtk::Align::Start,
+                        },
+
+                        #[name = "corner_progress"]
+                        gtk::ProgressBar {
+                            set_visible: false,
+                            set_show_text: true,
+                            set_width_request: 220,
+                        },
                     },
                 },
             },
@@ -495,6 +592,8 @@ impl Component for AppModel {
             search_panel: None,
             toast_epoch: Default::default(),
             columns_overflow: Default::default(),
+            transfers: Vec::new(),
+            transfer_indeterminate: Default::default(),
             state,
         };
 
@@ -804,11 +903,38 @@ impl Component for AppModel {
             AppMsg::Transfer(transfer) => {
                 match transfer {
                     Transfer::New { id, description } => {
+                        self.transfers.push((
+                            id,
+                            crate::transfer::Active {
+                                description: description.clone(),
+                                current: 0,
+                                total: 0,
+                            },
+                        ));
                         self.progress
                             .guard()
                             .push_back(NewTransfer { id, description });
+
+                        // Say nothing for a while. A copy that finishes inside
+                        // the threshold is better served by its completion
+                        // toast alone; a bar that flashes for a few frames is
+                        // noise that informs nobody.
+                        let sender = sender.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(400),
+                            move || sender.input(AppMsg::RevealTransfer),
+                        );
                     }
                     Transfer::Progress(progress) => {
+                        if let Some((_, active)) = self
+                            .transfers
+                            .iter_mut()
+                            .find(|(id, _)| *id == progress.id)
+                        {
+                            active.current = progress.current;
+                            active.total = progress.total;
+                        }
+
                         let idx = self
                             .progress
                             .iter()
@@ -819,10 +945,43 @@ impl Component for AppModel {
                                 .send(idx, TransferProgressMsg::Update(progress));
                         }
                     }
+                    Transfer::Done { id } => {
+                        self.transfers.retain(|(active, _)| *active != id);
+
+                        let idx = self.progress.iter().position(|child| child.id == id);
+
+                        if let Some(idx) = idx {
+                            self.progress.guard().remove(idx);
+                        }
+                    }
                 }
 
+                self.refresh_transfers(widgets);
+            }
+            AppMsg::RevealTransfer => {
+                // Only if something is still running: the copy may well have
+                // finished while this timeout was pending.
                 if !self.progress.is_empty() {
-                    widgets.transfer_progress_button.set_visible(true);
+                    widgets.corner_progress.set_visible(true);
+                    widgets.corner_toast.set_reveal_child(true);
+                    self.refresh_transfers(widgets);
+
+                    // Animate the bar while nothing can be measured. It stops
+                    // itself when the indicator goes away.
+                    let indeterminate = self.transfer_indeterminate.clone();
+                    let bar = widgets.corner_progress.downgrade();
+                    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                        let Some(bar) = bar.upgrade() else {
+                            return glib::ControlFlow::Break;
+                        };
+                        if !bar.is_visible() {
+                            return glib::ControlFlow::Break;
+                        }
+                        if indeterminate.get() {
+                            bar.pulse();
+                        }
+                        glib::ControlFlow::Continue
+                    });
                 }
             }
             AppMsg::Toast(message) => {

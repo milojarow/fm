@@ -178,11 +178,32 @@ pub async fn copy_tree(source: gio::File, destination: gio::File, sender: Sender
                 other => other,
             }
         } else {
-            let (operation, _progress) = node.source.copy_future(
+            let (operation, mut progress) = node.source.copy_future(
                 &target,
                 gio::FileCopyFlags::NOFOLLOW_SYMLINKS,
                 glib::Priority::DEFAULT,
             );
+
+            // Read the stream in its own task and simply await the copy, which
+            // is what `move_` below has always done. Joining the two instead
+            // looks tidier and hangs: the progress channel does not close when
+            // the copy finishes, so a combinator that waits for the stream to
+            // end waits forever, and the whole paste never reports done.
+            //
+            // Bytes are offset by everything this walk already finished, so the
+            // bar tracks the whole tree instead of restarting at every file.
+            let finished_before = done;
+            let reporter_sender = sender.clone();
+            relm4::spawn_local(async move {
+                while let Some((current, _file_total)) = progress.next().await {
+                    let _ = reporter_sender.send(AppMsg::Transfer(Transfer::Progress(Progress {
+                        id,
+                        current: finished_before + current,
+                        total,
+                    })));
+                }
+            });
+
             operation.await
         };
 
@@ -201,13 +222,9 @@ pub async fn copy_tree(source: gio::File, destination: gio::File, sender: Sender
         }
     }
 
-    // An empty copy, or one made only of directories, never reported progress.
-    // Close the transfer anyway so its spinner does not hang around forever.
-    let _ = sender.send(AppMsg::Transfer(Transfer::Progress(Progress {
-        id,
-        current: total,
-        total,
-    })));
+    // Close the transfer. Without this the row lives for the life of the
+    // process and the header keeps a spinner over work that finished long ago.
+    let _ = sender.send(AppMsg::Transfer(Transfer::Done { id }));
 }
 
 /// Move a file to a destination.
@@ -263,6 +280,11 @@ pub async fn move_(file: gio::File, destination: gio::File, sender: Sender<AppMs
     if let Err(err) = res.await {
         let _ = sender.send(AppMsg::Error(Box::new(err)));
     }
+
+    // Close it whether it succeeded or failed. A failed move used to leave its
+    // row up for the life of the process, claiming work that had already
+    // stopped.
+    let _ = sender.send(AppMsg::Transfer(Transfer::Done { id }));
 }
 
 /// Move a dropped file into the destination directory.

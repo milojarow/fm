@@ -153,3 +153,47 @@ the threshold:
    between them.
 6. Exercise the primary flow — select, navigate, mark, copy, play audio — since a
    past regression in this fork shipped from touching the models without doing so.
+
+## Found while building
+
+Three things the design did not anticipate. All measured.
+
+### `future::join` on the copy and its stream hangs
+
+The tidy way to drive both — `future::join(operation, reporter)` where `reporter`
+is `progress.for_each(...)` — never returns. The copy completes and the file
+lands whole, but the progress channel does not close when it does, so a
+combinator that waits for the stream to end waits forever. The paste then never
+reports done and the transfer row never clears.
+
+`move_` never had this problem because it reads the stream in its own task with
+`relm4::spawn_local` and simply awaits the copy. `copy_tree` now does the same.
+The pattern that looked tidier was the one that hung.
+
+### A same-filesystem copy can report almost nothing
+
+Measured with a 3 GB file, outside `fm` entirely:
+
+| copy | progress events |
+|---|---|
+| within one filesystem, page cache warm | **2** |
+| across filesystems | 384,001 |
+
+Warm, the kernel satisfies the copy with `copy_file_range` — one call that blocks
+until it is done and reports nothing in between. Cold, the same copy falls back
+to a read/write loop and reports normally.
+
+So an indeterminate state is not a corner case to hand-wave: the indicator must
+be able to say *working, no idea how far* without lying. That is what the
+`Option<f64>` fraction and the pulsing bar are for. A bar frozen at 0% for
+fifteen seconds is worse than no bar.
+
+### The indicator cannot read the progress children
+
+`FactoryVecDeque::send` queues; the child's model updates on a later turn. Asking
+the children for their numbers in the same turn returns the previous state.
+
+With byte-level progress arriving hundreds of times a second that lag is
+invisible. With a same-filesystem copy reporting twice, it is total: the corner
+showed the placeholder `1 byte` for the entire copy. The app now keeps the
+authoritative numbers itself and the children render the popover only.
